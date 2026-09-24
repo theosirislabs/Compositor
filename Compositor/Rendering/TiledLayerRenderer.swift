@@ -411,7 +411,6 @@ nonisolated final class TiledPieceCache: @unchecked Sendable {
         let full = CGRect(x: 0, y: 0, width: raster.width, height: raster.height)
         let squares = TiledLayerRenderer.interiors(near: raster.patches.map(\.rect), margin: TiledLayerRenderer.support(level: level),
                                                    size: TiledLayerRenderer.committedCell, step: CGFloat(1 << level), origin: origin, visible: visible)
-        let missing = squares.filter { already[$0] == nil }
         // What each square costs at this level, so the budget is known before anything is built.
         func outputPixels(_ square: CGRect) -> Int? {
             let margin = TiledLayerRenderer.support(level: level)

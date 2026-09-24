@@ -323,10 +323,10 @@ private nonisolated func array(_ value: Engine?) -> [Engine] {
     return []
 }
 
-private let textDescriptorDepthLimit = 6
-private let textDescriptorNodeLimit = 250_000
-private let textEngineDepthLimit = 12
-private let textEngineNodeLimit = 250_000
+nonisolated private let textDescriptorDepthLimit = 6
+nonisolated private let textDescriptorNodeLimit = 250_000
+nonisolated private let textEngineDepthLimit = 12
+nonisolated private let textEngineNodeLimit = 250_000
 
 /// Photoshop's text-engine dictionary: a small PostScript-like subset (`<< >>`, arrays, names, numbers, strings).
 private nonisolated func engineValue(_ data: Data) throws -> Engine? {

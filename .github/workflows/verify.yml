@@ -32,9 +32,8 @@ jobs:
           -scheme Compositor
           -onlyUsePackageVersionsFromResolvedFile
 
-      # C is warning-clean, so a new one is a build break. Swift is not: the codebase carries 45
-      # main-actor isolation warnings under Swift 6 that have to be worked down before
-      # SWIFT_TREAT_WARNINGS_AS_ERRORS can be switched on.
+      # The codebase builds warning-clean in Swift 6 isolation terms, so a new warning in either
+      # language is a build break. This is what keeps it that way.
       - name: Build for testing
         id: build
         run: >
@@ -46,6 +45,7 @@ jobs:
           -derivedDataPath DerivedData
           CODE_SIGN_IDENTITY=-
           GCC_TREAT_WARNINGS_AS_ERRORS=YES
+          SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
 
       - name: Build Release
         run: >
@@ -58,6 +58,7 @@ jobs:
           CODE_SIGN_IDENTITY=-
           CODE_SIGNING_ALLOWED=NO
           GCC_TREAT_WARNINGS_AS_ERRORS=YES
+          SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
 
       # These two suites show real windows and time them, so they run alone after the rest.
       - name: Run unit tests in parallel

@@ -96,8 +96,8 @@ extension EditorSession {
         let mask = isMaskSelected
         guard var image = mask ? layer.mask?.asset.image : layer.asset?.image else { return }
         finishOpacityEdit()
-        isProjectBusy = true
-        defer { isProjectBusy = false }
+        beginProjectOperation()
+        defer { endProjectOperation() }
         do {
             let clip = try selection?.clip(canvas: document.size)
             // A uniform 1×1 mask can't hold a partial selection; give it the layer's pixel grid first.

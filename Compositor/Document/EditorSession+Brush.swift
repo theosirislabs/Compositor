@@ -152,8 +152,8 @@ extension EditorSession {
     /// Assembles a raster edit off the main thread and replaces the layer's pixels or
     /// mask as one undo step. Other layer properties are read at commit time.
     func commitRasterEdit(_ stroke: BrushStroke, name: String, alsoApply: (() -> Void)? = nil) async throws {
-        isProjectBusy = true
-        defer { isProjectBusy = false }
+        beginProjectOperation()
+        defer { endProjectOperation() }
         guard stroke.committedTransform.isValid else { throw ProjectError.tooLarge }
         let input = stroke.commitInput()
         let result = try await BrushCommit.shared.render(input)

@@ -494,8 +494,8 @@ extension EditorSession {
             brushRevision += 1
         }
         guard !settings.isIdentity else { return }
-        isProjectBusy = true
-        defer { isProjectBusy = false }
+        beginProjectOperation()
+        defer { endProjectOperation() }
         let job = HueSaturationJob(image: edit.original.image, settings: settings,
                                    selection: edit.selection, pixelToDocument: edit.pixelToDocument, thumbnail: true)
         guard let adjusted = await adjustedPixels(job),

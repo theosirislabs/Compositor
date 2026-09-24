@@ -150,7 +150,7 @@ final class EditorSession {
     private var fileRequestWaiters: [CheckedContinuation<Void, Never>] = []
     var canStartProjectOperation: Bool {
         _ = showsBusy // Re-evaluate in the UI when a long operation starts or ends.
-        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && adjustmentEditingID == nil && !showsConversionSheet && !showsPDFImport
+        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && adjustmentEditingID == nil && !showsConversionSheet && !showsRawDevelop && !showsPDFImport
     }
     func waitForFileRequest() async {
         while !canStartProjectOperation {
@@ -592,7 +592,7 @@ final class EditorSession {
     var isModified: Bool { history.isModified }
     var canUseHistory: Bool {
         _ = showsBusy
-        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && transformEdit == nil && !showsConversionSheet && !showsPDFImport
+        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && transformEdit == nil && !showsConversionSheet && !showsRawDevelop && !showsPDFImport
     }
     var canUndo: Bool { canUseHistory && (history.canUndo || gradientEdit != nil) }
     var canRedo: Bool { canUseHistory && history.canRedo }
@@ -629,7 +629,7 @@ final class EditorSession {
     var activeLayer: ImageLayer? { document?.layers.first { $0.id == activeLayerID } }
     var canEditLayers: Bool {
         _ = showsBusy
-        return selectionAmountOperation == nil && textDraft == nil && document != nil && brushStroke == nil && warpStroke == nil && !isProjectBusy && !isImporting && !showsNewDocument && !showsImporter && renamingLayerID == nil && transformEdit == nil && cropRect == nil && gradientEdit == nil && pixelMove == nil && hueSaturation == nil && levels == nil && filterEdit == nil && adjustmentEditingID == nil
+        return selectionAmountOperation == nil && textDraft == nil && document != nil && brushStroke == nil && warpStroke == nil && !isProjectBusy && !isImporting && !showsNewDocument && !showsImporter && renamingLayerID == nil && transformEdit == nil && cropRect == nil && gradientEdit == nil && pixelMove == nil && hueSaturation == nil && levels == nil && filterEdit == nil && adjustmentEditingID == nil && !showsConversionSheet && !showsRawDevelop && !showsPDFImport
     }
 
     func addBlankLayer() {
@@ -882,15 +882,6 @@ final class EditorSession {
         showsConversionSheet = false
         conversionRequest = nil
     }
-    func confirmPSDConversions(_ conversions: [PSDConversion], title: String, confirmTitle: String) async -> Bool {
-        if let confirmConversions { return await confirmConversions(conversions) }
-        return await withCheckedContinuation { continuation in
-            conversionContinuation = continuation
-            conversionRequest = PSDConversionRequest(title: title, confirmTitle: confirmTitle, conversions: conversions)
-            showsConversionSheet = true
-        }
-    }
-
     func finishConversion(_ confirmed: Bool) {
         if !confirmed, conversionRequest?.isReading == true { conversionCancelled = true }
         showsConversionSheet = false

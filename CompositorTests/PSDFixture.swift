@@ -246,7 +246,8 @@ nonisolated enum PSDFixture {
                      tx: Double = 40, ty: Double = 50,
                      xx: Double = 1, xy: Double = 0, yx: Double = 0, yy: Double = 1,
                      bounds: (CGFloat, CGFloat, CGFloat, CGFloat)? = nil,
-                     glyphBounds: (CGFloat, CGFloat, CGFloat, CGFloat)? = nil) -> Data {
+                     glyphBounds: (CGFloat, CGFloat, CGFloat, CGFloat)? = nil,
+                     fontNumber: String = "0", nestedItemDepth: Int = 0) -> Data {
         var block = PSDBuffer()
         block.u16(1)
         for value in [xx, xy, yx, yy, tx, ty] { block.f64(value) }
@@ -261,21 +262,45 @@ nonisolated enum PSDFixture {
         if let glyphBounds {
             items.append(("boundingBox", rectItem(glyphBounds)))
         }
-        items.append(("EngineData", rawItem(Data(engine(text: text, font: font, fontSize: fontSize, red: red, green: green, blue: blue, justification: justification, tracking: tracking, leading: leading, fauxBold: fauxBold, fauxItalic: fauxItalic, secondSize: secondSize, secondLeading: secondLeading, secondHorizontalScale: secondHorizontalScale, secondVerticalScale: secondVerticalScale).utf8))))
+        if nestedItemDepth > 0 {
+            items.append(("Nested", nestedItem(depth: nestedItemDepth)))
+        }
+        items.append(("EngineData", rawItem(Data(engine(text: text, font: font, fontSize: fontSize, red: red, green: green, blue: blue, justification: justification, tracking: tracking, leading: leading, fauxBold: fauxBold, fauxItalic: fauxItalic, fontNumber: fontNumber, secondSize: secondSize, secondLeading: secondLeading, secondHorizontalScale: secondHorizontalScale, secondVerticalScale: secondVerticalScale).utf8))))
         block.descriptor(classID: "TxLr", items: items)
         block.u16(1)
         block.descriptor(classID: "warp", items: [("warpStyle", enumItem(type: "warpStyle", value: warp ? "warpArc" : "warpNone"))])
         return block.data
     }
 
-    private static func engine(text: String, font: String, fontSize: Double, red: Double, green: Double, blue: Double, justification: Int, tracking: Double, leading: Double?, fauxBold: Bool, fauxItalic: Bool, secondSize: Double?, secondLeading: Double?, secondHorizontalScale: Double?, secondVerticalScale: Double?) -> String {
+    /// A descriptor item nested `depth` levels, the shape a real file never has and a reader that
+    /// recurses without a depth limit never survives.
+    static func nestedItem(depth: Int) -> Data {
+        var value = Data()
+        for _ in 0..<max(1, depth) {
+            var descriptor = PSDBuffer()
+            descriptor.u32(0)
+            descriptor.id("Nest")
+            descriptor.u32(value.isEmpty ? 0 : 1)
+            if !value.isEmpty {
+                descriptor.id("Inner")
+                descriptor.bytes(value)
+            }
+            var item = PSDBuffer()
+            item.string("Objc")
+            item.bytes(descriptor.data)
+            value = item.data
+        }
+        return value
+    }
+
+    private static func engine(text: String, font: String, fontSize: Double, red: Double, green: Double, blue: Double, justification: Int, tracking: Double, leading: Double?, fauxBold: Bool, fauxItalic: Bool, fontNumber: String, secondSize: Double?, secondLeading: Double?, secondHorizontalScale: Double?, secondVerticalScale: Double?) -> String {
         let run = { (size: Double, runLeading: Double?, horizontal: Double, vertical: Double) in """
 <<
 /StyleSheet
 <<
 /StyleSheetData
 <<
-/Font 0
+/Font \(fontNumber)
 /FontSize \(size)
 /FauxBold \(fauxBold)
 /FauxItalic \(fauxItalic)

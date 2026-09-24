@@ -197,6 +197,7 @@ actor ProjectStore {
             if let text = layer.text {
                 guard text.isValid, layer.imageFile != nil, layer.isGroup != true, layer.adjustment == nil else { throw ProjectError.invalid }
             }
+            guard layer.effects?.isValid ?? true, layer.shape?.isValid ?? true else { throw ProjectError.invalid }
             if let adjustment = layer.adjustment {
                 guard manifest.version >= 7, layer.isGroup != true, layer.imageFile == nil, adjustment.isValid else { throw ProjectError.invalid }
                 if adjustment.kind == .gaussianBlur || adjustment.kind == .motionBlur || adjustment.kind == .addNoise {

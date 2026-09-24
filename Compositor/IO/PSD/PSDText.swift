@@ -32,23 +32,28 @@ nonisolated enum PSDText {
     }
 
     static func parse(extra: [String: Data]) -> Source? {
+        (try? parseChecked(extra: extra)) ?? nil
+    }
+
+    static func parseChecked(extra: [String: Data]) throws -> Source? {
         guard let data = extra["TySh"] ?? extra["tySh"], data.count <= 8_000_000 else { return nil }
         var reader = Reader(data: data)
         guard reader.u16() == 1 else { return nil }
         guard let xx = reader.f64(), let xy = reader.f64(), let yx = reader.f64(),
               let yy = reader.f64(), let tx = reader.f64(), let ty = reader.f64(),
               [xx, xy, yx, yy, tx, ty].allSatisfy(\.isFinite) else { return nil }
-        guard reader.u16() == 50, let text = reader.descriptor(versioned: true) else { return nil }
+        guard reader.u16() == 50, let text = try reader.descriptor(versioned: true) else { return nil }
         if let orientation = text.enumeration("Ornt"), orientation == "Vrtc" { return nil }
         guard let placed = placement(xx: xx, xy: xy, yx: yx, yy: yy, tx: tx, ty: ty) else { return nil }
 
         var notes: [String] = []
-        if reader.remaining >= 2, reader.u16() == 1, let warp = reader.descriptor(versioned: true),
+        if reader.remaining >= 2, reader.u16() == 1, let warp = try reader.descriptor(versioned: true),
            let style = warp.enumeration("warpStyle"), style != "warpNone", style != "none" {
             notes.append(warpNote)
         }
 
-        let engine = text.data("EngineData").flatMap(engineValue)
+        let engine: Engine?
+        if let engineData = text.data("EngineData") { engine = try engineValue(engineData) } else { engine = nil }
         let content = cleaned(text.string("Txt ") ?? text.string("Txt"))
             ?? engine.flatMap { cleaned(string(walk($0, "EngineDict", "Editor", "Text"))) }
         guard let content, !content.isEmpty, content.utf16.count <= 100_000 else { return nil }
@@ -56,7 +61,7 @@ nonisolated enum PSDText {
         var style = LayerTextStyle()
         style.content = content
         if let engine {
-            applyStyle(&style, engine: engine, pixelScale: placed.pixelScale, notes: &notes)
+            guard applyStyle(&style, engine: engine, pixelScale: placed.pixelScale, notes: &notes) else { return nil }
         } else {
             style.fontSize = CGFloat(min(2000, max(1, 12 * placed.pixelScale)))
         }
@@ -131,18 +136,20 @@ nonisolated enum PSDText {
         }
     }
 
-    private static func applyStyle(_ style: inout LayerTextStyle, engine: Engine, pixelScale: Double, notes: inout [String]) {
+    private static func applyStyle(_ style: inout LayerTextStyle, engine: Engine, pixelScale: Double, notes: inout [String]) -> Bool {
         let runs = array(walk(engine, "EngineDict", "StyleRun", "RunArray"))
         let first = runs.first ?? engine
         let sheet = walk(first, "StyleSheet", "StyleSheetData") ?? walk(engine, "EngineDict", "StyleRun", "RunArray")
         let data = sheet ?? first
         let points = number(walk(data, "FontSize")) ?? 12
-        guard points.isFinite, points > 0 else { return }
+        guard points.isFinite, points > 0 else { return false }
         style.fontSize = CGFloat(min(2000, max(1, points * pixelScale)))
         let fonts = array(walk(engine, "ResourceDict", "FontSet"))
-        let index = Int((number(walk(data, "Font")) ?? 0).rounded())
-        if fonts.indices.contains(index), let name = string(walk(fonts[index], "Name")), !name.isEmpty {
-            style.fontName = name
+        if let fontNumber = number(walk(data, "Font")) {
+            guard let index = exactInteger(fontNumber, range: 0...max(0, fonts.count - 1)) else { return false }
+            if fonts.indices.contains(index), let name = string(walk(fonts[index], "Name")), !name.isEmpty {
+                style.fontName = name
+            }
         }
         let values = array(walk(data, "FillColor", "Values"))
         if !values.isEmpty {
@@ -167,15 +174,26 @@ nonisolated enum PSDText {
             notes.append(firstStyleNote)
         }
         let paragraphs = array(walk(engine, "EngineDict", "ParagraphRun", "RunArray"))
-        let justification = number(walk(paragraphs.first ?? engine, "ParagraphSheet", "Properties", "Justification"))
-        switch Int((justification ?? 0).rounded()) {
-        case 1: style.alignment = .right
-        case 2: style.alignment = .center
-        case 0: style.alignment = .left
-        default:
+        if let justification = number(walk(paragraphs.first ?? engine, "ParagraphSheet", "Properties", "Justification")) {
+            guard let justification = exactInteger(justification, range: 0...3) else { return false }
+            switch justification {
+            case 1: style.alignment = .right
+            case 2: style.alignment = .center
+            case 0: style.alignment = .left
+            default:
+                style.alignment = .left
+                notes.append(justifyNote)
+            }
+        } else {
             style.alignment = .left
-            notes.append(justifyNote)
         }
+        return true
+    }
+
+    private static func exactInteger(_ value: Double, range: ClosedRange<Int>) -> Int? {
+        guard value.isFinite, value == value.rounded(), value >= Double(Int.min), value <= Double(Int.max),
+              value >= Double(range.lowerBound), value <= Double(range.upperBound), let integer = Int(exactly: value) else { return nil }
+        return integer
     }
 
     private struct Signature: Equatable {
@@ -305,34 +323,43 @@ private nonisolated func array(_ value: Engine?) -> [Engine] {
     return []
 }
 
+private let textDescriptorDepthLimit = 6
+private let textDescriptorNodeLimit = 250_000
+private let textEngineDepthLimit = 12
+private let textEngineNodeLimit = 250_000
+
 /// Photoshop's text-engine dictionary: a small PostScript-like subset (`<< >>`, arrays, names, numbers, strings).
-private nonisolated func engineValue(_ data: Data) -> Engine? {
-    if let dict = dictionary(in: data, at: 0) { return dict }
+private nonisolated func engineValue(_ data: Data) throws -> Engine? {
+    if let dict = try dictionary(in: data, at: 0) { return dict }
     guard let start = data.firstRange(of: Data("<<".utf8))?.lowerBound, start > 0 else { return nil }
-    return dictionary(in: data, at: start)
+    return try dictionary(in: data, at: start)
 }
 
-private nonisolated func dictionary(in data: Data, at start: Int) -> Engine? {
+private nonisolated func dictionary(in data: Data, at start: Int) throws -> Engine? {
     var cursor = EngineCursor(data: data)
     cursor.index = start
-    guard case .dict(let items) = cursor.parseValue() else { return nil }
+    guard case .dict(let items) = try cursor.parseValue() else { return nil }
     return .dict(items)
 }
 
 private nonisolated struct EngineCursor {
     let bytes: [UInt8]
     var index = 0
+    var depth = 0
+    var nodeCount = 0
 
     init(data: Data) { bytes = [UInt8](data) }
 
-    mutating func parseValue() -> Engine? {
+    mutating func parseValue() throws -> Engine? {
+        guard nodeCount < textEngineNodeLimit else { throw PSDError.truncated }
+        nodeCount += 1
         skipWhitespace()
         guard let byte = peek else { return nil }
         if byte == UInt8(ascii: "<") {
-            if peek(ahead: 1) == UInt8(ascii: "<") { return parseDictionary() }
+            if peek(ahead: 1) == UInt8(ascii: "<") { return try parseDictionary() }
             return parseHex()
         }
-        if byte == UInt8(ascii: "[") { return parseArray() }
+        if byte == UInt8(ascii: "[") { return try parseArray() }
         if byte == UInt8(ascii: "(") { return parseString() }
         if byte == UInt8(ascii: "/") {
             index += 1
@@ -347,7 +374,10 @@ private nonisolated struct EngineCursor {
         return nil
     }
 
-    mutating func parseDictionary() -> Engine? {
+    mutating func parseDictionary() throws -> Engine? {
+        guard depth < textEngineDepthLimit else { throw PSDError.truncated }
+        depth += 1
+        defer { depth -= 1 }
         guard take("<<") else { return nil }
         var items: [String: Engine] = [:]
         while true {
@@ -356,20 +386,23 @@ private nonisolated struct EngineCursor {
             guard peek == UInt8(ascii: "/") else { return nil }
             index += 1
             let key = readToken()
-            guard let value = parseValue() else { return nil }
+            guard let value = try parseValue() else { return nil }
             items[key] = value
         }
         guard take(">>") else { return nil }
         return .dict(items)
     }
 
-    mutating func parseArray() -> Engine? {
+    mutating func parseArray() throws -> Engine? {
+        guard depth < textEngineDepthLimit else { throw PSDError.truncated }
+        depth += 1
+        defer { depth -= 1 }
         guard take("[") else { return nil }
         var items: [Engine] = []
         while true {
             skipWhitespace()
             if peek == nil || peek == UInt8(ascii: "]") { break }
-            guard let value = parseValue() else { return nil }
+            guard let value = try parseValue() else { return nil }
             items.append(value)
         }
         guard take("]") else { return nil }
@@ -468,7 +501,8 @@ private nonisolated struct EngineCursor {
 
     mutating func takeWord(_ word: String) -> Bool {
         let encoded = Array(word.utf8)
-        guard index + encoded.count <= bytes.count, Array(bytes[index..<index + encoded.count]) == encoded else { return false }
+        guard index >= 0, index <= bytes.count, encoded.count <= bytes.count - index,
+              Array(bytes[index..<index + encoded.count]) == encoded else { return false }
         let after = index + encoded.count
         if after < bytes.count, !isDelimiter(bytes[after]) { return false }
         index = after
@@ -477,7 +511,8 @@ private nonisolated struct EngineCursor {
 
     mutating func take(_ token: String) -> Bool {
         let encoded = Array(token.utf8)
-        guard index + encoded.count <= bytes.count, Array(bytes[index..<index + encoded.count]) == encoded else { return false }
+        guard index >= 0, index <= bytes.count, encoded.count <= bytes.count - index,
+              Array(bytes[index..<index + encoded.count]) == encoded else { return false }
         index += encoded.count
         return true
     }
@@ -494,8 +529,9 @@ private nonisolated struct EngineCursor {
         return index <= bytes.count
     }
 
-    var peek: UInt8? { index < bytes.count ? bytes[index] : nil }
+    var peek: UInt8? { index >= 0 && index < bytes.count ? bytes[index] : nil }
     func peek(ahead: Int) -> UInt8? {
+        guard index >= 0, index <= bytes.count, ahead >= 0, ahead <= bytes.count - index else { return nil }
         let at = index + ahead
         return at < bytes.count ? bytes[at] : nil
     }
@@ -539,20 +575,28 @@ private nonisolated extension Dictionary where Key == String, Value == Descripto
 private nonisolated struct Reader {
     let data: Data
     var offset = 0
-    var remaining: Int { data.count - offset }
+    var remaining: Int { offset >= 0 && offset <= data.count ? data.count - offset : 0 }
+    var depth = 0
+    var nodeCount = 0
 
-    mutating func descriptor(versioned: Bool) -> [String: DescriptorValue]? {
+    mutating func descriptor(versioned: Bool) throws -> [String: DescriptorValue]? {
+        guard depth < textDescriptorDepthLimit, nodeCount < textDescriptorNodeLimit else { throw PSDError.truncated }
+        nodeCount += 1
+        depth += 1
+        defer { depth -= 1 }
         if versioned, u32() != 16 { return nil }
         guard unicode() != nil, identifier() != nil, let count = u32(), count <= 10_000 else { return nil }
         var items: [String: DescriptorValue] = [:]
         for _ in 0..<Int(count) {
-            guard let key = identifier(), let type = fourCC(), let value = value(type) else { return nil }
+            guard let key = identifier(), let type = fourCC(), let value = try value(type) else { return nil }
             items[key] = value
         }
         return items
     }
 
-    mutating func value(_ type: String) -> DescriptorValue? {
+    mutating func value(_ type: String) throws -> DescriptorValue? {
+        guard nodeCount < textDescriptorNodeLimit else { throw PSDError.truncated }
+        nodeCount += 1
         switch type {
         case "doub":
             guard let number = f64() else { return nil }
@@ -580,13 +624,13 @@ private nonisolated struct Reader {
             guard let length = u32(), length <= 8_000_000, let raw = bytes(Int(length)) else { return nil }
             return .data(raw)
         case "Objc", "GlbO":
-            guard let nested = descriptor(versioned: false) else { return nil }
+            guard let nested = try descriptor(versioned: false) else { return nil }
             return .descriptor(nested)
         case "VlLs":
             guard let count = u32(), count <= 10_000 else { return nil }
             var items: [DescriptorValue] = []
             for _ in 0..<Int(count) {
-                guard let itemType = fourCC(), let item = value(itemType) else { return nil }
+                guard let itemType = fourCC(), let item = try value(itemType) else { return nil }
                 items.append(item)
             }
             return .list(items)
@@ -646,17 +690,22 @@ private nonisolated struct Reader {
         return String(bytes: raw, encoding: .ascii)
     }
 
+    private func checkedAdvance(_ count: Int) -> Int? {
+        guard count >= 0, offset >= 0, offset <= data.count, count <= data.count - offset else { return nil }
+        return offset + count
+    }
+
     mutating func bytes(_ count: Int) -> Data? {
-        guard count >= 0, offset + count <= data.count else { return nil }
-        let slice = data.subdata(in: offset..<(offset + count))
-        offset += count
+        guard let end = checkedAdvance(count) else { return nil }
+        let slice = data.subdata(in: offset ..< end)
+        offset = end
         return slice
     }
 
     mutating func u8() -> UInt8? {
-        guard offset < data.count else { return nil }
+        guard let end = checkedAdvance(1) else { return nil }
         let value = data[offset]
-        offset += 1
+        offset = end
         return value
     }
 

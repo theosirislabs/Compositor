@@ -12,6 +12,7 @@ struct ProjectWorkspaceView: View {
             .disabled(workspace.isManaging)
             .psdConversionSheet(workspace.current.session)
             .rawDevelopSheet(workspace.current.session)
+            .pdfImportSheet(workspace.current.session)
             .background {
                 ProjectWindowBridge(controller: workspace.current.controller).frame(width: 0, height: 0)
             }

@@ -50,11 +50,35 @@ final class EffectsPreviewCache {
     private var seeds: [UUID: Result] = [:]
     private var sideLimit = 1536
 
+    init() {
+        RenderCacheRegistry.register { [weak self] in
+            Task { @MainActor [weak self] in self?.purge() }
+        }
+    }
+
     /// Shows `image` at `placement` for a layer until a fresh preview is ready.
     func seed(_ id: UUID, image: CGImage, placement: LayerTransform) {
         // Whatever is being rendered is for the pixels this replaces, and landing later would drop the seed.
         entries.removeValue(forKey: id)?.request.cancel()
+        guard let image = boundedSeed(image) else { return }
         seeds[id] = Result(image: image, inset: 0, placement: placement)
+    }
+
+    private func boundedSeed(_ image: CGImage) -> CGImage? {
+        let factor = min(1, CGFloat(sideLimit) / CGFloat(max(image.width, image.height)))
+        guard factor < 1 else { return image }
+        let width = max(1, Int((CGFloat(image.width) * factor).rounded()))
+        let height = max(1, Int((CGFloat(image.height) * factor).rounded()))
+        guard let context = try? BrushRaster.context(width: width, height: height, mask: false) else { return nil }
+        context.interpolationQuality = .high
+        BrushRaster.draw(image, in: CGRect(origin: .zero, size: CGSize(width: width, height: height)), mask: false, context: context)
+        return context.makeImage()
+    }
+
+    private func purge() {
+        for entry in entries.values { entry.request.cancel() }
+        entries.removeAll()
+        seeds.removeAll()
     }
 
     /// Effects for a layer being painted, from the pixels the stroke has so far. Keyed by the stroke's revision:

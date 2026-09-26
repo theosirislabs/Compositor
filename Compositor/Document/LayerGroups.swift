@@ -63,7 +63,7 @@ nonisolated enum LayerOpacity {
     }
 }
 
-extension ImageLayer {
+nonisolated extension ImageLayer {
     /// The opacity this layer is drawn at, folders included (see LayerOpacity).
     func effectiveOpacity(in byID: [UUID: ImageLayer]) -> Double {
         LayerOpacity.effective(opacity, parent: parentID) { byID[$0].map { ($0.opacity, $0.parentID) } }

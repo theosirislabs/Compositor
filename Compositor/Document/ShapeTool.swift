@@ -57,7 +57,7 @@ nonisolated struct LayerShape: Equatable, @unchecked Sendable {
     }
 }
 
-extension ImageLayer {
+nonisolated extension ImageLayer {
     /// The shape this layer still is: nil once its pixels were edited some other way.
     var liveShape: LayerShape? {
         guard let shape, let image = asset?.image, image === shape.image else { return nil }

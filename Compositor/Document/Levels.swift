@@ -198,8 +198,8 @@ extension EditorSession {
         if edit.settings.isIdentity { cancelLevels(); return }
         edit.committing = true
         edit.previewTask?.cancel(); edit.histogramTask?.cancel()
-        isProjectBusy = true
-        defer { levels = nil; isProjectBusy = false; brushRevision += 1 }
+        beginProjectOperation()
+        defer { levels = nil; endProjectOperation(); brushRevision += 1 }
         let job = LevelsJob(image: edit.original.image, settings: edit.settings, selection: edit.selection, mapping: edit.mapping)
         do {
             let asset = try await Task.detached(priority: .userInitiated) {

@@ -110,7 +110,7 @@ struct PSDMalformedInputTests {
                                                  bitmapInfo: CGImageAlphaInfo.none.rawValue))
             context.setFillColor(gray: 0.5, alpha: 1)
             context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
-            return try #require(context.makeImage())
+            return context.makeImage()!
         }()
         let file = try PSDFixture.data(PSDDocument(width: 8, height: 8, resolution: 72, layers: [layer]), composite: red)
         // 64 image pixels and 64 mask pixels: each budget is 64, so both fit.

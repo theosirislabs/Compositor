@@ -600,9 +600,9 @@ extension EditorSession {
         edit.committing = true
         edit.previewTask?.cancel()
         if edit.kind != .cameraRaw { filterSettings = edit.settings }
-        isProjectBusy = true
+        beginProjectOperation()
         // The preview stays up until the result is on the layer, so the canvas never flashes the original.
-        defer { filterEdit = nil; isProjectBusy = false; brushRevision += 1 }
+        defer { filterEdit = nil; endProjectOperation(); brushRevision += 1 }
         // Remove Background masks the background out rather than erasing it, so it can be brought back at any time
         // by painting the mask, disabling it, or deleting it.
         if edit.kind == .removeBackground { await commitBackgroundMask(edit); return }

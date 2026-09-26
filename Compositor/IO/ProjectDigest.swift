@@ -25,7 +25,7 @@ nonisolated struct ProjectDigest: Equatable, Sendable {
             guard values.isRegularFile == true else { continue }
             hasher.update(data: Data(name.utf8))
             var count = UInt64(values.fileSize ?? 0)
-            hasher.update(bufferPointer: UnsafeRawBufferPointer(start: &count, count: MemoryLayout<UInt64>.size))
+            withUnsafeBytes(of: &count) { hasher.update(bufferPointer: $0) }
         }
         return ProjectDigest(value: Data(hasher.finalize()))
     }

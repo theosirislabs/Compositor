@@ -1,7 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct ImageLayer: Identifiable, Equatable {
+nonisolated struct ImageLayer: Identifiable, Equatable {
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.id == rhs.id && lhs.name == rhs.name && lhs.isVisible == rhs.isVisible && lhs.transform == rhs.transform
             && lhs.asset?.image === rhs.asset?.image && lhs.parentID == rhs.parentID && lhs.isGroup == rhs.isGroup && lhs.opacity == rhs.opacity && lhs.blendMode == rhs.blendMode && lhs.mask == rhs.mask && lhs.maskSourceID == rhs.maskSourceID && lhs.adjustment == rhs.adjustment && lhs.shape == rhs.shape && lhs.text == rhs.text && lhs.effects == rhs.effects
@@ -116,16 +116,29 @@ final class EditorSession {
     /// Blocks overlapping edits immediately. Not observed by the UI: controls only dim via
     /// `showsBusy`, after an operation has run long enough to be worth showing, so quick
     /// edits (invert, fills, stroke commits) never flash the interface.
-    @ObservationIgnored var isProjectBusy = false {
-        didSet {
-            if !isProjectBusy {
-                let waiters = projectWaiters
-                projectWaiters.removeAll()
-                for waiter in waiters { waiter.resume() }
-            }
-            resumeFileRequests()
-            updateBusyIndicator()
+    ///
+    /// Counted rather than a flag: operations used to set `isProjectBusy` on the way in and clear
+    /// it on the way out, so two that overlapped — a Save and a brush commit, say — let the first
+    /// release the second's hold and a third walk in while it was still writing. The flag now
+    /// means "at least one operation is running" and only the last one to finish lets it go.
+    @ObservationIgnored private var projectOperations = 0
+    var isProjectBusy: Bool { projectOperations > 0 }
+
+    func beginProjectOperation() {
+        projectOperations += 1
+        resumeFileRequests()
+        updateBusyIndicator()
+    }
+
+    func endProjectOperation() {
+        projectOperations = max(0, projectOperations - 1)
+        if !isProjectBusy {
+            let waiters = projectWaiters
+            projectWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
         }
+        resumeFileRequests()
+        updateBusyIndicator()
     }
     /// True once `isProjectBusy` has lasted longer than `busyIndicatorDelay`.
     private(set) var showsBusy = false

@@ -121,12 +121,12 @@ extension EditorSession {
               let context = try? BrushRaster.context(width: document.width, height: document.height, mask: false) else { return }
         drawLiveComposite(document, in: context)
         guard let shown = context.makeImage() else { return }
-        isProjectBusy = true
+        beginProjectOperation()
         let found = await Task.detached(priority: .userInitiated) { () -> Result<CGImage, Error> in
             do { return .success(try SubjectRemoval.subjectMask(shown, under: nil, settings: FilterSettings())) }
             catch { return .failure(error) }
         }.value
-        isProjectBusy = false
+        endProjectOperation()
         guard self.document?.id == document.id else { return }
         switch found {
         case .failure(let error):

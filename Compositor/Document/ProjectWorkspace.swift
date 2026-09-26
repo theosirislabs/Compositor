@@ -200,13 +200,15 @@ final class ProjectWorkspace {
         let used = target.session.document?.layers.reduce(0) { $0 + ($1.asset.map { $0.image.width * $0.image.height } ?? 0) } ?? 0
         let added = copied.reduce(0) { $0 + ($1.asset.map { $0.image.width * $0.image.height } ?? 0) }
         guard used + added <= DocumentLimits.documentPixelBudget else { target.session.importError = "The copied layers exceed this project’s \(DocumentLimits.documentBudgetMegapixels)-megapixel limit."; return }
+        // Both sessions take the lock: the copy reads one and writes the other, and the counter
+        // releases each when it is done rather than whichever finishes first.
+        sourceTab.session.beginProjectOperation()
+        target.session.beginProjectOperation()
         isManaging = true
-        sourceTab.session.isProjectBusy = true
-        target.session.isProjectBusy = true
         defer {
             isManaging = false
-            sourceTab.session.isProjectBusy = false
-            target.session.isProjectBusy = false
+            sourceTab.session.endProjectOperation()
+            target.session.endProjectOperation()
         }
         do {
             for i in copied.indices where copied[i].maskSourceID.map({ !included.contains($0) }) == true {
@@ -231,7 +233,7 @@ final class ProjectWorkspace {
                     transform: transform, parentID: layer.parentID.flatMap { mapping[$0] }, isGroup: layer.isGroup,
                     opacity: layer.opacity, blendMode: layer.blendMode, mask: mask, maskSourceID: layer.maskSourceID.flatMap { mapping[$0] }, adjustment: layer.adjustment, shape: layer.shape, effects: layer.effects, text: layer.text)
             }
-            target.session.isProjectBusy = false
+            target.session.endProjectOperation()
             target.session.beginEdit("Copy Layers from Project")
             if target.session.document == nil { target.session.createDocument(width: Int(size.width), height: Int(size.height)) }
             target.session.document?.layers.append(contentsOf: layers)

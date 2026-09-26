@@ -125,7 +125,7 @@ nonisolated struct LayerText: Equatable, @unchecked Sendable {
     }
 }
 
-extension ImageLayer {
+nonisolated extension ImageLayer {
     var liveText: LayerText? {
         guard let text, let image = asset?.image, image === text.image else { return nil }
         return text

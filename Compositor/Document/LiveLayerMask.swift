@@ -114,9 +114,9 @@ extension EditorSession {
         let response = alert.runModal()
         if response == .alertThirdButtonReturn { finishDeletingLayers(ids, baked: [:]); return true }
         guard response == .alertFirstButtonReturn, let snapshot = projectSnapshot() else { return true }
-        isProjectBusy = true
+        beginProjectOperation()
         Task {
-            defer { isProjectBusy = false }
+            defer { endProjectOperation() }
             do {
                 let baked = try await Task.detached(priority: .userInitiated) {
                     var result: [UUID: ImportedImage] = [:]

@@ -167,8 +167,8 @@ extension EditorSession {
     func commitCrop() async {
         guard canStartProjectOperation, let rect = cropRect, CropGeometry.valid(rect),
               let snapshot = projectSnapshot() else { return }
-        isProjectBusy = true
-        defer { isProjectBusy = false }
+        beginProjectOperation()
+        defer { endProjectOperation() }
         do {
             let result = try await CanvasResizer.shared.resize(snapshot,
                 to: CanvasSizeOptions(width: Int(rect.width), height: Int(rect.height),

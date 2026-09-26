@@ -8,6 +8,8 @@ final class ProjectController {
     weak var window: NSWindow?
     weak var workspace: ProjectWorkspace?
     private var saveGeneration = 0
+    /// Keeps the document in step with its package when something else writes it. See ProjectController+ExternalChanges.
+    let externalChanges = ExternalChangeState()
     var canStart: Bool {
         session.canStartProjectOperation && workspace?.isManaging != true
     }
@@ -23,10 +25,21 @@ final class ProjectController {
 
     @discardableResult
     func save(asNew: Bool = false) async -> Bool {
-        guard session.document != nil, begin() else { return false }
-        defer { session.isProjectBusy = false }
-        return await saveCurrent(asNew: asNew)
+        guard session.document != nil else { return false }
+        // Another save still writing finishes first; then this one saves whatever has changed since.
+        await finishWriting()
+        guard begin() else { return false }
+        let prepared = await prepareSave(asNew: asNew)
+        // Only the snapshot (and the Save panel) holds the tools. The document is captured, so editing can go on
+        // while the package is written in the background, as in Photoshop.
+        session.isProjectBusy = false
+        guard let prepared else { return false }
+        return await write(prepared.snapshot, to: prepared.destination, revision: prepared.revision)
     }
+
+    /// The save still writing, if any. Close, quit and replacing the document wait for it.
+    private var writing: Task<Bool, Never>?
+    func finishWriting() async { if let writing { _ = await writing.value } }
 
     func exportPNG() async {
         guard session.document != nil, begin() else { return }
@@ -150,7 +163,15 @@ final class ProjectController {
     }
 
     private func saveCurrent(asNew: Bool = false) async -> Bool {
-        guard let snapshot = session.projectSnapshot() else { return true }
+        guard session.document != nil else { return true }
+        guard let prepared = await prepareSave(asNew: asNew) else { return false }
+        return await write(prepared.snapshot, to: prepared.destination, revision: prepared.revision)
+    }
+
+    /// The document as it is now, and where it goes: asks with the Save panel when it has no file yet (or Save As).
+    private func prepareSave(asNew: Bool) async -> (snapshot: ProjectSnapshot, destination: URL, revision: UUID)? {
+        let revision = session.history.currentRevision
+        guard let snapshot = session.projectSnapshot() else { return nil }
         var destination = asNew ? nil : session.projectURL
         if destination == nil {
             let panel = NSSavePanel()
@@ -162,23 +183,39 @@ final class ProjectController {
             let response: NSApplication.ModalResponse
             if let window { response = await panel.beginSheetModal(for: window) }
             else { response = await panel.begin() }
-            guard response == .OK, let url = panel.url else { return false }
+            guard response == .OK, let url = panel.url else { return nil }
             destination = url
         }
-        guard let destination else { return false }
-        let scoped = destination.startAccessingSecurityScopedResource()
-        defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
-        do {
-            try await ProjectStore.shared.save(snapshot, to: destination)
-            session.projectURL = destination
-            session.history.markSaved()
-            saveGeneration += 1
-            NSDocumentController.shared.noteNewRecentDocumentURL(destination)
-            return true
-        } catch {
-            await showError("Couldn’t save the project", error: error)
-            return false
+        guard let destination else { return nil }
+        return (snapshot, destination, revision)
+    }
+
+    /// Writes a captured document in the background. Only that captured version counts as saved.
+    private func write(_ snapshot: ProjectSnapshot, to destination: URL, revision: UUID) async -> Bool {
+        let task = Task { @MainActor [self] () -> Bool in
+            let scoped = destination.startAccessingSecurityScopedResource()
+            defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
+            // Our own save changes the package too; the watch ignores events until the saved bytes are remembered.
+            externalChanges.saving = true
+            defer { externalChanges.saving = false }
+            do {
+                try await ProjectStore.shared.save(snapshot, to: destination)
+                session.projectURL = destination
+                session.history.markSaved(revision)
+                saveGeneration += 1
+                RecentProjects.shared.note(destination)
+                await rememberProjectDigest(for: destination)
+                watchProject(at: destination)
+                return true
+            } catch {
+                await showError("Couldn’t save the project", error: error)
+                return false
+            }
         }
+        writing = task
+        let saved = await task.value
+        if writing == task { writing = nil }
+        return saved
     }
 
     @discardableResult
@@ -201,6 +238,12 @@ final class ProjectController {
             source = url
         }
         guard let source else { return false }
+        // A recent project deleted in Finder: name the project, not the manifest inside it the load would miss.
+        guard FileManager.default.fileExists(atPath: source.path) else {
+            RecentProjects.shared.refresh()
+            await showError("Couldn’t open the project", error: CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: source.path]))
+            return false
+        }
         let scoped = source.startAccessingSecurityScopedResource()
         defer { if scoped { source.stopAccessingSecurityScopedResource() } }
         do {
@@ -214,7 +257,9 @@ final class ProjectController {
                 snapshot = try await ProjectStore.shared.load(from: source)
             }
             session.installProject(snapshot, from: source)
-            NSDocumentController.shared.noteNewRecentDocumentURL(source)
+            RecentProjects.shared.note(source)
+            await rememberProjectDigest(for: source)
+            watchProject(at: source)
             return true
         } catch {
             await showError("Couldn’t open the project", error: error)
@@ -227,7 +272,7 @@ final class ProjectController {
         guard begin() else { return }
         let proceed = await confirmReplacement()
         session.isProjectBusy = false
-        if proceed { session.clearProject() }
+        if proceed { session.clearProject(); stopWatchingProject() }
     }
 
     func close(_ window: NSWindow) async {
@@ -239,6 +284,7 @@ final class ProjectController {
         session.isProjectBusy = false
         if proceed {
             session.clearProject()
+            stopWatchingProject()
             window.close()
         }
     }
@@ -250,6 +296,8 @@ final class ProjectController {
     }
 
     private func confirmReplacement() async -> Bool {
+        // A save still writing finishes before the project can be closed or replaced, so its file is never cut short.
+        await finishWriting()
         guard session.isModified, session.document != nil else { return true }
         let alert = NSAlert()
         alert.messageText = "Save changes to \(session.projectURL?.lastPathComponent ?? "Untitled")?"

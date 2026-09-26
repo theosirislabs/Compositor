@@ -6,14 +6,14 @@ import Darwin
 
 extension UTType {
     static let compositorProject = UTType(exportedAs: "com.compositor.project", conformingTo: .package)
-    static let photoshopImage = UTType(importedAs: "com.adobe.photoshop-image")
-    static let photoshopLargeImage = UTType(importedAs: "com.adobe.photoshop-large-image")
+    nonisolated static let photoshopImage = UTType(importedAs: "com.adobe.photoshop-image")
+    nonisolated static let photoshopLargeImage = UTType(importedAs: "com.adobe.photoshop-large-image")
     static let importableImages: [UTType] = [.jpeg, .png, .heic, .tiff, .photoshopImage, .photoshopLargeImage, .rawImage, .svg, .pdf]
 }
 
 nonisolated struct ProjectManifest: Codable, Sendable {
     /// The format version new saves write.
-    static let current = 9
+    static let current = 10
     /// Every version `load` accepts. The package-header check, the manifest check and the error
     /// message all read this, so they cannot drift apart when `current` is bumped.
     static let supported = 1...ProjectManifest.current
@@ -189,8 +189,10 @@ actor ProjectStore {
             }
             let checkedFile = try checkFile(file, inside: url, in: directory, maximumBytes: Self.maximumAssetBytes)
             let asset = try autoreleasepool {
-                // The bytes come from the descriptor that was just checked, so a file swapped
-                // between the check and the read cannot be the file that is decoded.
+                // Decoded from the bytes of the descriptor that was just checked, never from the file: an image
+                // made from a file source stays tied to it, and the next save replaces that file (ImageIO:
+                // "mmapped file changed"), so an image kept for undo could later read someone else's pixels.
+                // Reading by name again, as this used to, would also reopen the window for a swapped file.
                 let data = try readData(checkedFile, maximumBytes: Self.maximumAssetBytes)
                 close(checkedFile.descriptor)
                 guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
@@ -229,7 +231,8 @@ actor ProjectStore {
               manifest.layers.count <= 10_000 else { throw ProjectError.tooLarge }
         for layer in manifest.layers {
             if let text = layer.text {
-                guard text.isValid, layer.imageFile != nil, layer.isGroup != true, layer.adjustment == nil else { throw ProjectError.invalid }
+                // Letters in their own colors arrived in version 10.
+                guard text.isValid, text.colorRuns == nil || manifest.version >= 10, layer.imageFile != nil, layer.isGroup != true, layer.adjustment == nil else { throw ProjectError.invalid }
             }
             guard layer.effects?.isValid ?? true, layer.shape?.isValid ?? true else { throw ProjectError.invalid }
             if let adjustment = layer.adjustment {

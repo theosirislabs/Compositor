@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
+import Darwin
 
 extension UTType {
     static let compositorProject = UTType(exportedAs: "com.compositor.project", conformingTo: .package)
@@ -76,6 +77,12 @@ nonisolated enum ProjectError: LocalizedError {
 
 actor ProjectStore {
     static let shared = ProjectStore()
+    private static let maximumManifestBytes = 4 * 1024 * 1024
+    private static let maximumAssetBytes = 512 * 1024 * 1024
+    private static let maximumPackageBytes = maximumManifestBytes + 20_000 * maximumAssetBytes
+    private struct CheckedFile {
+        let descriptor: Int32
+    }
     private struct Header: Decodable {
         let format: String
         let version: Int
@@ -84,7 +91,7 @@ actor ProjectStore {
     func save(_ snapshot: ProjectSnapshot, to url: URL) throws {
         try validate(snapshot.manifest)
         var images: [String: FileWrapper] = [:]
-        var pixels = 0, maskPixels = 0
+        var pixels = 0, maskPixels = 0, packageBytes = 0
         for layer in snapshot.manifest.layers {
           for isMask in [false, true] {
             guard let filename = isMask ? layer.maskFile : layer.imageFile else { continue }
@@ -102,13 +109,19 @@ actor ProjectStore {
                 guard CGImageDestinationFinalize(destination) else { throw ProjectError.encode }
                 return data as Data
             }
+            guard data.count <= Self.maximumAssetBytes else { throw ProjectError.tooLarge }
+            let (totalBytes, overflow) = packageBytes.addingReportingOverflow(data.count)
+            guard !overflow, totalBytes <= Self.maximumPackageBytes else { throw ProjectError.tooLarge }
+            packageBytes = totalBytes
             images[filename] = FileWrapper(regularFileWithContents: data)
           }
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let metadata = try encoder.encode(snapshot.manifest)
-        guard metadata.count <= 4 * 1024 * 1024 else { throw ProjectError.tooLarge }
+        guard metadata.count <= Self.maximumManifestBytes else { throw ProjectError.tooLarge }
+        let (totalPackageBytes, overflow) = packageBytes.addingReportingOverflow(metadata.count)
+        guard !overflow, totalPackageBytes <= Self.maximumPackageBytes else { throw ProjectError.tooLarge }
         let package = FileWrapper(directoryWithFileWrappers: [
             "manifest.json": FileWrapper(regularFileWithContents: metadata),
             "images": FileWrapper(directoryWithFileWrappers: images)
@@ -138,10 +151,15 @@ actor ProjectStore {
 
     private func readPackage(_ url: URL) throws -> ProjectSnapshot {
         guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { throw ProjectError.invalid }
+        let packageRoot = url.resolvingSymlinksInPath().standardizedFileURL
+        let packageDescriptor = open(packageRoot.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard packageDescriptor >= 0 else { throw ProjectError.invalid }
+        defer { close(packageDescriptor) }
+
         let metadataURL = url.appendingPathComponent("manifest.json")
-        try checkFile(metadataURL, inside: url, maximumBytes: 4 * 1024 * 1024)
+        let checkedMetadata = try checkFile(metadataURL, inside: url, in: packageDescriptor, maximumBytes: Self.maximumManifestBytes)
+        let metadata = try readData(checkedMetadata, maximumBytes: Self.maximumManifestBytes)
         let manifest: ProjectManifest
-        let metadata = try Data(contentsOf: metadataURL)
         let header: Header
         do { header = try JSONDecoder().decode(Header.self, from: metadata) }
         catch { throw ProjectError.invalid }
@@ -153,17 +171,31 @@ actor ProjectStore {
         var images: [UUID: ImportedImage] = [:]
         var masks: [UUID: ImportedImage] = [:]
         var pixels = 0, maskPixels = 0
+        var imageDirectory: Int32?
+        defer { if let imageDirectory { close(imageDirectory) } }
         for layer in manifest.layers {
           for isMask in [false, true] {
             guard let filename = isMask ? layer.maskFile : layer.imageFile else { continue }
             let file = url.appendingPathComponent("images").appendingPathComponent(filename)
-            try checkFile(file, inside: url, maximumBytes: 512 * 1024 * 1024)
+            try validateContainedPath(file, inside: url)
+            let directory: Int32
+            if let imageDirectory {
+                directory = imageDirectory
+            } else {
+                let imagesDirectory = openat(packageDescriptor, "images", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard imagesDirectory >= 0 else { throw ProjectError.tooLarge }
+                imageDirectory = imagesDirectory
+                directory = imagesDirectory
+            }
+            let checkedFile = try checkFile(file, inside: url, in: directory, maximumBytes: Self.maximumAssetBytes)
             let asset = try autoreleasepool {
-                // Decoded from the file's bytes in memory, not from the file: an image made from a file source stays tied
-                // to it, and the next save replaces that file (ImageIO: "mmapped file changed"), so an image kept for undo
-                // could later read someone else's pixels.
-                let bytes = try Data(contentsOf: file)
-                guard let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+                // Decoded from the bytes of the descriptor that was just checked, never from the file: an image
+                // made from a file source stays tied to it, and the next save replaces that file (ImageIO:
+                // "mmapped file changed"), so an image kept for undo could later read someone else's pixels.
+                // Reading by name again, as this used to, would also reopen the window for a swapped file.
+                let data = try readData(checkedFile, maximumBytes: Self.maximumAssetBytes)
+                close(checkedFile.descriptor)
+                guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
                       CGImageSourceGetType(source) as String? == UTType.png.identifier,
                       CGImageSourceGetCount(source) == 1,
                       let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -259,11 +291,37 @@ actor ProjectStore {
         used += width * height
     }
 
-    private func checkFile(_ file: URL, inside package: URL, maximumBytes: Int) throws {
+    private func validateContainedPath(_ file: URL, inside package: URL) throws {
         let root = package.resolvingSymlinksInPath().standardizedFileURL.path + "/"
         guard file.resolvingSymlinksInPath().standardizedFileURL.path.hasPrefix(root) else { throw ProjectError.invalid }
-        let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true,
-              let size = values.fileSize, size <= maximumBytes else { throw ProjectError.tooLarge }
+    }
+
+    private func checkFile(_ file: URL, inside package: URL, in directory: Int32, maximumBytes: Int) throws -> CheckedFile {
+        try validateContainedPath(file, inside: package)
+        var checked = stat()
+        guard lstat(file.path, &checked) == 0, checked.st_mode & S_IFMT == S_IFREG,
+              Int64(checked.st_size) <= Int64(maximumBytes) else { throw ProjectError.tooLarge }
+        let descriptor = openat(directory, file.lastPathComponent, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw ProjectError.tooLarge }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0, opened.st_mode & S_IFMT == S_IFREG,
+              opened.st_dev == checked.st_dev, opened.st_ino == checked.st_ino,
+              Int64(opened.st_size) <= Int64(maximumBytes) else {
+            close(descriptor)
+            throw ProjectError.tooLarge
+        }
+        return CheckedFile(descriptor: descriptor)
+    }
+
+    private func readData(_ file: CheckedFile, maximumBytes: Int) throws -> Data {
+        let handle = FileHandle(fileDescriptor: file.descriptor, closeOnDealloc: false)
+        defer { try? handle.close() }
+        var data = Data()
+        while true {
+            let chunk = handle.readData(ofLength: 64 * 1024)
+            if chunk.isEmpty { return data }
+            guard data.count <= maximumBytes, chunk.count <= maximumBytes - data.count else { throw ProjectError.tooLarge }
+            data.append(chunk)
+        }
     }
 }

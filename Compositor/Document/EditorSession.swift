@@ -774,6 +774,9 @@ final class EditorSession {
           let point = document == nil ? nil : request.point
           for (url, scoped) in request.files {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            // A drop that could not be read from its original location was copied into a folder of
+            // its own; that copy is ours to remove once the import has had it.
+            defer { ImageFileDrop.discardTemporaryCopy(of: url) }
             do {
                 guard url.isFileURL else { throw ImageImportError.unsupported }
                 let usedPixels = document?.layers.reduce(0) { total, layer in

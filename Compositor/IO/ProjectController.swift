@@ -2,6 +2,78 @@ import AppKit
 import UniformTypeIdentifiers
 import SwiftUI
 
+private final class SheetRequest<Output>: @unchecked Sendable {
+    private struct Pending: @unchecked Sendable {
+        let continuation: CheckedContinuation<Output?, Never>
+        let cleanup: () -> Void
+    }
+
+    private let lock = NSLock()
+    private var cancelled = false
+    private var pending: Pending?
+    private var observers: [NSObjectProtocol] = []
+
+    @discardableResult
+    func resume(_ output: Output?) -> Output? {
+        guard let pending = takePending() else { return nil }
+        finish(pending, output: output)
+        return output
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let pending = pending
+        let observers = observers
+        self.pending = nil
+        self.observers.removeAll()
+        lock.unlock()
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        if let pending { finish(pending, output: nil) }
+    }
+
+    func start(
+        continuation: CheckedContinuation<Output?, Never>,
+        observers: [NSObjectProtocol],
+        cleanup: @escaping () -> Void
+    ) -> Bool {
+        lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            observers.forEach { NotificationCenter.default.removeObserver($0) }
+            finish(Pending(continuation: continuation, cleanup: cleanup), output: nil)
+            return false
+        }
+        pending = Pending(continuation: continuation, cleanup: cleanup)
+        self.observers = observers
+        lock.unlock()
+        return true
+    }
+
+    func isPending() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pending != nil
+    }
+
+    private func takePending() -> Pending? {
+        lock.lock()
+        let pending = pending
+        let observers = observers
+        self.pending = nil
+        self.observers.removeAll()
+        lock.unlock()
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
+        return pending
+    }
+
+    private func finish(_ pending: Pending, output: Output?) {
+        if Thread.isMainThread { pending.cleanup() }
+        else { DispatchQueue.main.async { pending.cleanup() } }
+        pending.continuation.resume(returning: output)
+    }
+}
+
 @MainActor
 final class ProjectController {
     let session: EditorSession
@@ -21,6 +93,40 @@ final class ProjectController {
         session.commitTransform()
         session.isProjectBusy = true
         return true
+    }
+
+    private func awaitSheet<Output>(
+        on window: NSWindow,
+        sheet: NSWindow,
+        content: (@escaping (Output?) -> Void) -> Void
+    ) async -> Output? {
+        let request = SheetRequest<Output>()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let closeObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.willCloseNotification, object: window, queue: .main
+                ) { [request] notification in
+                    guard let closing = notification.object as? NSWindow, closing === window else { return }
+                    request.cancel()
+                }
+                let terminateObserver = NotificationCenter.default.addObserver(
+                    forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+                ) { [request] _ in request.cancel() }
+                guard request.start(
+                    continuation: continuation,
+                    observers: [closeObserver, terminateObserver],
+                    cleanup: {
+                        if window.attachedSheet === sheet { window.endSheet(sheet) }
+                        sheet.orderOut(nil)
+                        sheet.contentViewController = nil
+                    }
+                ) else { return }
+                content { output in _ = request.resume(output) }
+                if request.isPending() { window.beginSheet(sheet) }
+            }
+        } onCancel: {
+            request.cancel()
+        }
     }
 
     @discardableResult
@@ -64,17 +170,11 @@ final class ProjectController {
     func canvasSize() async {
         guard let window, let document = session.document, begin() else { return }
         defer { session.isProjectBusy = false }
-        let options: CanvasSizeOptions? = await withCheckedContinuation { continuation in
-            let sheet = NSWindow()
-            sheet.styleMask = [.titled, .fullSizeContentView]
-            sheet.title = "Canvas Size"
-            sheet.contentViewController = NSHostingController(rootView: CanvasSizeSheet(document: document, foreground: session.foregroundColor, background: session.backgroundColor) { options in
-                window.endSheet(sheet)
-                sheet.orderOut(nil)
-                sheet.contentViewController = nil
-                continuation.resume(returning: options)
-            })
-            window.beginSheet(sheet)
+        let sheet = NSWindow()
+        sheet.styleMask = [.titled, .fullSizeContentView]
+        sheet.title = "Canvas Size"
+        let options: CanvasSizeOptions? = await awaitSheet(on: window, sheet: sheet) { completion in
+            sheet.contentViewController = NSHostingController(rootView: CanvasSizeSheet(document: document, foreground: session.foregroundColor, background: session.backgroundColor) { completion($0) })
         }
         guard let options, let snapshot = session.projectSnapshot() else { return }
         do {
@@ -86,17 +186,11 @@ final class ProjectController {
     func imageSize() async {
         guard let window, let document = session.document, begin() else { return }
         defer { session.isProjectBusy = false }
-        let options: ImageSizeOptions? = await withCheckedContinuation { continuation in
-            let sheet = NSWindow()
-            sheet.styleMask = [.titled, .fullSizeContentView]
-            sheet.title = "Image Size"
-            sheet.contentViewController = NSHostingController(rootView: ImageSizeSheet(document: document) { options in
-                window.endSheet(sheet)
-                sheet.orderOut(nil)
-                sheet.contentViewController = nil
-                continuation.resume(returning: options)
-            })
-            window.beginSheet(sheet)
+        let sheet = NSWindow()
+        sheet.styleMask = [.titled, .fullSizeContentView]
+        sheet.title = "Image Size"
+        let options: ImageSizeOptions? = await awaitSheet(on: window, sheet: sheet) { completion in
+            sheet.contentViewController = NSHostingController(rootView: ImageSizeSheet(document: document) { completion($0) })
         }
         guard let options, let snapshot = session.projectSnapshot() else { return }
         do {
@@ -108,17 +202,11 @@ final class ProjectController {
     func trim() async {
         guard let window, session.document != nil, begin() else { return }
         defer { session.isProjectBusy = false }
-        let options: TrimOptions? = await withCheckedContinuation { continuation in
-            let sheet = NSWindow()
-            sheet.styleMask = [.titled, .fullSizeContentView]
-            sheet.title = "Trim"
-            sheet.contentViewController = NSHostingController(rootView: TrimSheet { options in
-                window.endSheet(sheet)
-                sheet.orderOut(nil)
-                sheet.contentViewController = nil
-                continuation.resume(returning: options)
-            })
-            window.beginSheet(sheet)
+        let sheet = NSWindow()
+        sheet.styleMask = [.titled, .fullSizeContentView]
+        sheet.title = "Trim"
+        let options: TrimOptions? = await awaitSheet(on: window, sheet: sheet) { completion in
+            sheet.contentViewController = NSHostingController(rootView: TrimSheet { completion($0) })
         }
         guard let options, let snapshot = session.projectSnapshot() else { return }
         do {
@@ -135,18 +223,11 @@ final class ProjectController {
         guard let snapshot = session.projectSnapshot() else { return }
         do {
             let raster = try await ImageExporter.shared.render(snapshot)
-            let data: Data? = await withCheckedContinuation { continuation in
-                let sheet = NSWindow()
-                sheet.styleMask = [.titled, .fullSizeContentView]
-                sheet.title = "Export JPEG"
-                sheet.contentViewController = NSHostingController(rootView: JPEGExportSheet(raster: raster) { data in
-                    window.endSheet(sheet)
-                    sheet.orderOut(nil)
-                    // Release the hosted view and its closure after dismissal.
-                    sheet.contentViewController = nil
-                    continuation.resume(returning: data)
-                })
-                window.beginSheet(sheet)
+            let sheet = NSWindow()
+            sheet.styleMask = [.titled, .fullSizeContentView]
+            sheet.title = "Export JPEG"
+            let data: Data? = await awaitSheet(on: window, sheet: sheet) { completion in
+                sheet.contentViewController = NSHostingController(rootView: JPEGExportSheet(raster: raster) { completion($0) })
             }
             guard let data else { return }
             let panel = NSSavePanel()

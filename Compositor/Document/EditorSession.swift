@@ -150,7 +150,7 @@ final class EditorSession {
     private var fileRequestWaiters: [CheckedContinuation<Void, Never>] = []
     var canStartProjectOperation: Bool {
         _ = showsBusy // Re-evaluate in the UI when a long operation starts or ends.
-        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && adjustmentEditingID == nil && !showsConversionSheet
+        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && adjustmentEditingID == nil && !showsConversionSheet && !showsPDFImport
     }
     func waitForFileRequest() async {
         while !canStartProjectOperation {
@@ -531,6 +531,30 @@ final class EditorSession {
     /// Tests assign this to develop without a sheet.
     @ObservationIgnored var confirmRawDevelop: ((URL, RawDevelopSettings) async -> RawDevelopSettings?)?
 
+    /// The PDF being imported, and the choices its sheet is editing.
+    var pdfImport: (url: URL, options: PDFImportOptions)?
+    var showsPDFImport = false { didSet { resumeFileRequests() } }
+    @ObservationIgnored private var pdfContinuation: CheckedContinuation<PDFImportOptions?, Never>?
+    /// Tests assign this to import without a sheet.
+    @ObservationIgnored var confirmPDFImport: ((URL, PDFImportOptions) async -> PDFImportOptions?)?
+
+    /// Puts the import sheet up and waits for the choice; nil means the import was cancelled.
+    func choosePDFImport(_ url: URL) async -> PDFImportOptions? {
+        let options = PDFImportOptions()
+        if let confirmPDFImport { return await confirmPDFImport(url, options) }
+        return await withCheckedContinuation { continuation in
+            pdfContinuation = continuation
+            pdfImport = (url, options)
+            showsPDFImport = true
+        }
+    }
+    func finishPDFImport(_ options: PDFImportOptions?) {
+        showsPDFImport = false
+        pdfImport = nil
+        let continuation = pdfContinuation
+        pdfContinuation = nil
+        continuation?.resume(returning: options)
+    }
     /// Puts the develop sheet up and waits for the choice; nil means the import was cancelled.
     func developRaw(_ url: URL) async -> RawDevelopSettings? {
         let asShot = RawImporter.asShot(url) ?? RawDevelopSettings()
@@ -568,7 +592,7 @@ final class EditorSession {
     var isModified: Bool { history.isModified }
     var canUseHistory: Bool {
         _ = showsBusy
-        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && transformEdit == nil && !showsConversionSheet
+        return selectionAmountOperation == nil && textDraft == nil && !isProjectBusy && !isImporting && brushStroke == nil && warpStroke == nil && levels == nil && !showsNewDocument && !showsImporter && renamingLayerID == nil && importError == nil && transformEdit == nil && !showsConversionSheet && !showsPDFImport
     }
     var canUndo: Bool { canUseHistory && (history.canUndo || gradientEdit != nil) }
     var canRedo: Bool { canUseHistory && history.canRedo }
@@ -771,6 +795,11 @@ final class EditorSession {
                     let asset = try await ImageImporter.shared.decodeSVG(url, fitting: document?.size,
                                                                          remainingPixels: DocumentLimits.documentPixelBudget - usedPixels)
                     insert(asset, centeredAt: point)
+                } else if UTType(filenameExtension: url.pathExtension)?.conforms(to: .pdf) == true {
+                    guard let options = await choosePDFImport(url) else { continue }
+                    let pages = try await ImageImporter.shared.decodePDF(url, options: options,
+                                                                         remainingPixels: DocumentLimits.documentPixelBudget - usedPixels)
+                    for page in pages { insert(page, centeredAt: point) }
                 } else if PSDReader.matches(url) {
                     beginPSDReading(title: "Open “\(url.lastPathComponent)”?", confirmTitle: "Import")
                     let imported: PSDImport

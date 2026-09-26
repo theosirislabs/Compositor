@@ -6,11 +6,22 @@ The goal was to create a full-featured image editor that is completely free and 
 
 Because it’s open source, you can download the Xcode project and add, remove, or modify any feature to fit your workflow.
 
+## Installation
+
+### Download
+Get Compositor from [robbietilton.com/compositor](https://robbietilton.com/compositor), or download the latest release directly from [GitHub Releases](https://github.com/robbietilton/Compositor/releases/latest).
+
+### Homebrew
+
+```sh
+brew install --cask robbietilton-compositor
+```
+
 ## Features
 
 ### Layers
 - Layers and folders, with opacity and Photoshop's full set of blend modes in its order — a folder's opacity dims everything inside it
-- Layer masks: paint, fill, invert, blur and feather them; link or unlink them to transform a mask on its own
+- Layer masks: paint, fill, invert, blur and feather them anywhere on the canvas, past the layer's own pixels; link or unlink them to transform a mask on its own
 - Clipping masks and folder masks
 - Adjustment layers: Hue/Saturation, Levels, Curves, Exposure, Gradient Map, Grain, Black & White, Color Balance, Invert, Gaussian Blur, Motion Blur and Noise
 - Layer effects: Stroke, Drop Shadow, Color Overlay, Inner Shadow, Outer Glow and Inner Glow, rendered on the GPU and editable at any time
@@ -58,8 +69,13 @@ Because it’s open source, you can download the Xcode project and add, remove, 
 - Import JPEG, PNG, HEIC, TIFF, SVG, camera RAW (with a develop step first) and Photoshop PSD and PSB (8-bit RGB; not CMYK). A PDF is rasterized the way Photoshop rasterizes one: pick the pages, the page box to read, the resolution to draw them at and whether the paper is white or transparent, and each page arrives as its own layer. Photoshop folders, masks, blend modes, fill rectangles/ellipses, and simple horizontal text stay editable; other vectors and vertical text become pixels. A conversion report is shown before anything is applied.
 - Large documents: the memory budget scales with your Mac, and a Photoshop file too big to open has its layers cropped to the canvas instead
 - Export JPEG with a live preview (⇧⌥⌘S); Copy Merged
+- Keep working while a project saves
 - Photoshop-style keyboard shortcuts throughout, remappable in Edit > Keyboard Shortcuts
+- Drag a number's label to scrub its value, as in Photoshop
 - Automatic updates, signed and notarized
+
+### Works with AI agents
+- AI agents and scripts can build and edit projects directly: a `.comp` is a folder of PNG layers and a manifest, and an open project updates live as it's written. See [Writing Compositor projects](docs/writing-comp-files.md)
 
 ## Requirements
 

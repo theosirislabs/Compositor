@@ -5,14 +5,14 @@ import UniformTypeIdentifiers
 
 extension UTType {
     static let compositorProject = UTType(exportedAs: "com.compositor.project", conformingTo: .package)
-    static let photoshopImage = UTType(importedAs: "com.adobe.photoshop-image")
-    static let photoshopLargeImage = UTType(importedAs: "com.adobe.photoshop-large-image")
+    nonisolated static let photoshopImage = UTType(importedAs: "com.adobe.photoshop-image")
+    nonisolated static let photoshopLargeImage = UTType(importedAs: "com.adobe.photoshop-large-image")
     static let importableImages: [UTType] = [.jpeg, .png, .heic, .tiff, .photoshopImage, .photoshopLargeImage, .rawImage, .svg, .pdf]
 }
 
 nonisolated struct ProjectManifest: Codable, Sendable {
     /// The format version new saves write.
-    static let current = 9
+    static let current = 10
     /// Every version `load` accepts. The package-header check, the manifest check and the error
     /// message all read this, so they cannot drift apart when `current` is bumped.
     static let supported = 1...ProjectManifest.current
@@ -159,7 +159,11 @@ actor ProjectStore {
             let file = url.appendingPathComponent("images").appendingPathComponent(filename)
             try checkFile(file, inside: url, maximumBytes: 512 * 1024 * 1024)
             let asset = try autoreleasepool {
-                guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+                // Decoded from the file's bytes in memory, not from the file: an image made from a file source stays tied
+                // to it, and the next save replaces that file (ImageIO: "mmapped file changed"), so an image kept for undo
+                // could later read someone else's pixels.
+                let bytes = try Data(contentsOf: file)
+                guard let source = CGImageSourceCreateWithData(bytes as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
                       CGImageSourceGetType(source) as String? == UTType.png.identifier,
                       CGImageSourceGetCount(source) == 1,
                       let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -195,7 +199,8 @@ actor ProjectStore {
               manifest.layers.count <= 10_000 else { throw ProjectError.tooLarge }
         for layer in manifest.layers {
             if let text = layer.text {
-                guard text.isValid, layer.imageFile != nil, layer.isGroup != true, layer.adjustment == nil else { throw ProjectError.invalid }
+                // Letters in their own colors arrived in version 10.
+                guard text.isValid, text.colorRuns == nil || manifest.version >= 10, layer.imageFile != nil, layer.isGroup != true, layer.adjustment == nil else { throw ProjectError.invalid }
             }
             if let adjustment = layer.adjustment {
                 guard manifest.version >= 7, layer.isGroup != true, layer.imageFile == nil, adjustment.isValid else { throw ProjectError.invalid }

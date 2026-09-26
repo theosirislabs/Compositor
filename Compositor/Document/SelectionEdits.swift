@@ -81,7 +81,7 @@ extension EditorSession {
     /// first, and the Crop tool's rectangle doesn't block it.
     var canInvert: Bool {
         _ = showsBusy
-        guard document != nil, let layer = activeLayer, !isProjectBusy, !isImporting, brushStroke == nil, pixelMove == nil,
+        guard document != nil, textDraft == nil, let layer = activeLayer, !isProjectBusy, !isImporting, brushStroke == nil, pixelMove == nil,
               renamingLayerID == nil, !showsNewDocument, !showsImporter, selectedLayerIDs.count == 1, !layer.isGroup || isMaskSelected,
               document?.effectiveVisibleIDs.contains(layer.id) == true, selection?.isEmpty != true else { return false }
         return isMaskSelected ? layer.mask?.isEnabled == true : layer.asset != nil
@@ -200,7 +200,8 @@ extension EditorSession {
     private func applyPixelEdit(to layer: ImageLayer, name: String, _ paint: (BrushStroke) throws -> Void) async {
         finishOpacityEdit()
         do {
-            let edit = try makeRasterEdit(for: layer)
+            // On a mask, a fill covers the whole canvas, past the mask's own area, as the brush can.
+            let edit = try makeRasterEdit(for: layer, growsMask: true)
             try paint(edit)
             guard !edit.patches.isEmpty else { return }
             try await commitRasterEdit(edit, name: name)

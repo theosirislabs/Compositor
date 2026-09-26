@@ -18,6 +18,7 @@ nonisolated final class RasterSnapshot: @unchecked Sendable {
     private var bytesPerPixel: Int { isMask ? 1 : 4 }
     private let lock = NSLock()
     private var materialized: CGContext?
+    private var materializedImage: CGImage?
 
     init(width: Int, height: Int, base: CGImage?, baseRect: CGRect, patches: [BrushPatch], isMask: Bool = false, alignment: CGPoint? = nil) {
         self.width = width
@@ -158,6 +159,35 @@ nonisolated final class RasterSnapshot: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return materialized != nil
+    }
+
+    /// What this raster holds: the base it started from, every committed patch, and the full image
+    /// a `bytes()` call may already have made. A materialized context holds the same pixels as its
+    /// base and patches, so it is never built here just to be measured.
+    func retainedBytes(excluding seen: inout Set<ObjectIdentifier>) -> Int {
+        var bytes = 0
+        func add(_ image: CGImage) {
+            guard seen.insert(ObjectIdentifier(image)).inserted else { return }
+            bytes += image.bytesPerRow * image.height
+        }
+        if let base { add(base) }
+        for patch in patches { add(patch.image) }
+        lock.lock()
+        let image = materializedImage
+        lock.unlock()
+        if let image { add(image) }
+        return bytes
+    }
+
+    /// Remembers the images this raster holds without charging for them, for a caller counting
+    /// what history adds on top of a document that already has them.
+    func markRetained(in seen: inout Set<ObjectIdentifier>) {
+        if let base { seen.insert(ObjectIdentifier(base)) }
+        for patch in patches { seen.insert(ObjectIdentifier(patch.image)) }
+        lock.lock()
+        let image = materializedImage
+        lock.unlock()
+        if let image { seen.insert(ObjectIdentifier(image)) }
     }
 
     private func bytes() -> UnsafeMutableRawPointer? {

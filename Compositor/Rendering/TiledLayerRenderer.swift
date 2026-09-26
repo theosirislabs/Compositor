@@ -25,7 +25,7 @@ nonisolated enum TiledLayerRenderer {
 
     /// Grid pixels beyond a change that its reduced, resampled pixels can reach, with room to spare.
     static func support(level: Int) -> CGFloat { level == 0 ? 8 : CGFloat(16 << level) }
-    /// Piece squares: committed snapshots use large ones (fewer to build, once), live strokes small ones (little
+    /// Piece squares: committed snapshots use large ones (fewer to build per viewport), live strokes small ones (little
     /// to rebuild per mouse move). Both are whole multiples of every halving used.
     static let committedCell: CGFloat = 1024
     static let strokeCell: CGFloat = 256
@@ -221,7 +221,7 @@ nonisolated enum TiledLayerRenderer {
 
     /// A committed raster placed at `offset` in the frame's grid, leaving `holes` for pieces drawn over it.
     private static func drawCommitted(_ raster: RasterSnapshot, at offset: CGPoint, holes: [CGRect], frame: Frame, in context: CGContext) {
-        let pieces = TiledPieceCache.shared.pieces(for: raster, level: frame.level).map { $0.offsetBy(offset) }
+        let pieces = TiledPieceCache.shared.pieces(for: raster, level: frame.level, visible: frame.visible).map { $0.offsetBy(offset) }
         if let base = raster.base {
             drawBase(base, at: raster.baseRect.offsetBy(dx: offset.x, dy: offset.y), holes: pieces.map(\.interior) + holes,
                      frame: frame, in: context)
@@ -368,8 +368,10 @@ nonisolated enum TiledLayerRenderer {
     }
 }
 
-/// Committed rasters' pieces, built once per snapshot and level (snapshots never change); the least recently
-/// used are dropped beyond a pixel budget.
+/// Committed rasters' pieces, built once per square and level (snapshots never change); the least recently
+/// used are dropped beyond a pixel budget. A draw asks only for the squares its viewport reaches, so opening
+/// a large layer costs the viewport rather than the whole raster — and a later draw that pans over ground
+/// already built finds those pieces waiting rather than making them again.
 nonisolated final class TiledPieceCache: @unchecked Sendable {
     static let shared = TiledPieceCache()
     static let pixelBudget = 150_000_000
@@ -379,41 +381,79 @@ nonisolated final class TiledPieceCache: @unchecked Sendable {
     }
     private struct Entry {
         let raster: RasterSnapshot
-        let pieces: [TiledLayerRenderer.Piece]
+        var squares: [CGRect: TiledLayerRenderer.Piece] = [:]
+        var pixels: Int = 0
         var lastUse: UInt64
-        let pixels: Int
     }
     private var entries: [Key: Entry] = [:]
     private var clock: UInt64 = 0
     private let lock = NSLock()
 
-    func pieces(for raster: RasterSnapshot, level: Int) -> [TiledLayerRenderer.Piece] {
+    init() {
+        RenderCacheRegistry.register { [weak self] in self?.purge() }
+    }
+
+    func purge() {
+        lock.lock()
+        entries.removeAll()
+        lock.unlock()
+    }
+
+    func pieces(for raster: RasterSnapshot, level: Int, visible: CGRect? = nil) -> [TiledLayerRenderer.Piece] {
         let key = Key(raster: ObjectIdentifier(raster), level: level)
         lock.lock()
         clock += 1
-        if let entry = entries[key], entry.raster === raster {
-            entries[key]?.lastUse = clock
-            lock.unlock()
-            return entry.pieces
-        }
+        entries[key]?.lastUse = clock
+        let already = entries[key]?.raster === raster ? entries[key]?.squares ?? [:] : [:]
         lock.unlock()
+
         let origin = raster.alignment
         let full = CGRect(x: 0, y: 0, width: raster.width, height: raster.height)
         let squares = TiledLayerRenderer.interiors(near: raster.patches.map(\.rect), margin: TiledLayerRenderer.support(level: level),
-                                                   size: TiledLayerRenderer.committedCell, step: CGFloat(1 << level), origin: origin, visible: nil)
-        let pieces = squares.compactMap { square in
-            TiledLayerRenderer.piece(interior: square, level: level, origin: origin, bounds: full) { context, _ in raster.draw(in: full, context: context) }
+                                                   size: TiledLayerRenderer.committedCell, step: CGFloat(1 << level), origin: origin, visible: visible)
+        // What each square costs at this level, so the budget is known before anything is built.
+        func outputPixels(_ square: CGRect) -> Int? {
+            let margin = TiledLayerRenderer.support(level: level)
+            var region = TiledLayerRenderer.aligned(square.insetBy(dx: -margin, dy: -margin),
+                                                    step: CGFloat(1 << level), origin: origin)
+            let limit = TiledLayerRenderer.aligned(full, step: CGFloat(1 << level), origin: origin)
+            region = region.intersection(limit)
+            guard !region.isNull, !region.isEmpty else { return nil }
+            let step = 1 << level
+            let width = Int(region.width), height = Int(region.height)
+            guard width > 0, height > 0 else { return nil }
+            return ((width + step - 1) / step) * ((height + step - 1) / step)
         }
-        let pixels = pieces.reduce(0) { $0 + $1.image.width * $1.image.height }
+        var wanted: [(square: CGRect, pixels: Int)] = []
+        for square in squares where already[square] == nil {
+            guard let pixels = outputPixels(square) else { continue }
+            wanted.append((square, pixels))
+        }
+        let built = wanted.compactMap { request -> (CGRect, TiledLayerRenderer.Piece, Int)? in
+            guard let piece = TiledLayerRenderer.piece(interior: request.square, level: level, origin: origin, bounds: full,
+                                                     compose: { context, _ in raster.draw(in: full, context: context) }) else { return nil }
+            return (request.square, piece, piece.image.width * piece.image.height)
+        }
+
         lock.lock()
-        entries[key] = Entry(raster: raster, pieces: pieces, lastUse: clock, pixels: pixels)
-        var total = entries.values.reduce(0) { $0 + $1.pixels }
-        while total > Self.pixelBudget,
+        entries[key]?.lastUse = clock
+        var entry = entries[key]?.raster === raster ? entries[key]! : Entry(raster: raster, lastUse: clock)
+        for (square, piece, pixels) in built {
+            entry.squares[square] = piece
+            entry.pixels += pixels
+        }
+        var total = entries.values.reduce(0) { total, each in total + each.pixels } - entry.pixels
+        while total + entry.pixels > Self.pixelBudget,
               let oldest = entries.filter({ $0.key != key }).min(by: { $0.value.lastUse < $1.value.lastUse }) {
             total -= oldest.value.pixels
             entries.removeValue(forKey: oldest.key)
         }
+        // One raster that is larger than the whole budget is drawn from its base rather than
+        // cached: the pieces are a cache, not a requirement.
+        let accepted = total + entry.pixels <= Self.pixelBudget
+        if accepted { entries[key] = entry } else { entries.removeValue(forKey: key) }
         lock.unlock()
-        return pieces
+        guard accepted else { return [] }
+        return squares.compactMap { already[$0] ?? entry.squares[$0] }
     }
 }

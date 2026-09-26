@@ -63,8 +63,17 @@ struct PDFImportSheet: View {
             }
         }
         .padding(24).fixedSize()
-        .task(id: revision) { preview = PDFImportPreview.read(url, options: options) }
+        .task(id: revision) { await refresh() }
         .onChange(of: options) { _, _ in revision += 1 }
+    }
+
+    /// Reads page boxes off the main actor: a long document walked on every keystroke would stall
+    /// the sheet. `task(id:)` cancels the superseded request before a newer one starts.
+    private func refresh() async {
+        let url = self.url, options = self.options
+        let read = await Task.detached(priority: .userInitiated) { PDFImportPreview.read(url, options: options) }.value
+        guard !Task.isCancelled else { return }
+        preview = read
     }
 
     private var warning: Bool { preview.overBudget || preview.overSideLimit }

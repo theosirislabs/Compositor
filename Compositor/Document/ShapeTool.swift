@@ -29,6 +29,19 @@ nonisolated struct LayerShapeStyle: Codable, Equatable, Sendable {
     var start: CGPoint? = nil
     var end: CGPoint? = nil
     var color: PaletteColor { PaletteColor(red: red, green: green, blue: blue) }
+
+    /// What a loaded project is held to: a finite color, a corner radius and line width that can
+    /// actually be drawn, and line ends inside the layer's own box.
+    var isValid: Bool {
+        guard red.isFinite, green.isFinite, blue.isFinite, cornerRadius.isFinite, cornerRadius >= 0 else { return false }
+        guard let lineWidth, lineWidth.isFinite, lineWidth > 0 else { return lineWidth == nil && validEnds }
+        return validEnds
+    }
+    private var validEnds: Bool {
+        guard let start, let end else { return true }
+        return start.x.isFinite && start.y.isFinite && end.x.isFinite && end.y.isFinite
+            && (0...1).contains(start.x) && (0...1).contains(start.y) && (0...1).contains(end.x) && (0...1).contains(end.y)
+    }
 }
 
 /// A layer made with the Shape tool. Its pixels are an ordinary raster, so it clips, masks, blends and filters like

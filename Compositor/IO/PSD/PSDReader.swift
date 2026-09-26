@@ -38,62 +38,78 @@ nonisolated enum PSDReader {
         let canvasWidth = Int(try cursor.u32())
         let depth = try cursor.u16()
         let mode = try cursor.u16()
-        guard (1...DocumentLimits.maxSide).contains(canvasWidth), (1...DocumentLimits.maxSide).contains(canvasHeight),
-              canvasWidth * canvasHeight <= DocumentLimits.maxSurfacePixels else {
+        guard (1...DocumentLimits.maxSide).contains(canvasWidth), (1...DocumentLimits.maxSide).contains(canvasHeight) else {
+            throw ImageImportError.tooLarge
+        }
+        guard let canvasPixels = pixelCount(width: canvasWidth, height: canvasHeight), canvasPixels <= DocumentLimits.maxSurfacePixels else {
             throw ImageImportError.tooLarge
         }
         guard depth == 8 else { throw PSDError.unsupportedDepth }
         guard mode == 3 else { throw PSDError.unsupportedColorMode }
-        try cursor.skip(Int(try cursor.u32()))
-        let resourcesLength = Int(try cursor.u32())
-        let resourcesEnd = cursor.offset + resourcesLength
+        let colorModeLength = try checkedLength(UInt64(try cursor.u32()))
+        try cursor.skip(colorModeLength)
+        let resourcesLength = try checkedLength(UInt64(try cursor.u32()))
+        let resourcesEnd = try cursor.checkedAdvance(resourcesLength)
         var resolution = 72.0
-        while cursor.offset + 12 <= resourcesEnd {
-            let signature = try cursor.string(4)
+        while cursor.offset <= resourcesEnd, resourcesEnd - cursor.offset >= 12 {
+            let signature = try cursor.string(4, limit: resourcesEnd)
             guard signature == "8BIM" else { break }
-            let id = try cursor.u16()
-            let nameLength = Int(try cursor.u8())
-            try cursor.skip(nameLength)
-            if (nameLength + 1) % 2 == 1 { try cursor.skip(1) }
-            let length = Int(try cursor.u32())
-            let dataStart = cursor.offset
+            let id = try cursor.u16(limit: resourcesEnd)
+            let nameLength = try checkedLength(UInt64(try cursor.u8(limit: resourcesEnd)))
+            try cursor.skip(nameLength, limit: resourcesEnd)
+            if (nameLength + 1) % 2 == 1 { try cursor.skip(1, limit: resourcesEnd) }
+            let length = try checkedLength(UInt64(try cursor.u32(limit: resourcesEnd)))
+            let dataEnd = try cursor.checkedAdvance(length, limit: resourcesEnd)
             if id == 1005, length >= 4 {
-                resolution = Double(try cursor.u32()) / 65536
+                resolution = Double(try cursor.u32(limit: resourcesEnd)) / 65536
                 if !resolution.isFinite || resolution < 1 { resolution = 72 }
                 resolution = min(9600, max(1, resolution))
             }
-            cursor.offset = dataStart + length
-            if length % 2 == 1 { try cursor.skip(1) }
+            cursor.offset = dataEnd
+            if length % 2 == 1 { try cursor.skip(1, limit: resourcesEnd) }
         }
         cursor.offset = resourcesEnd
         let layerSection = try checkedLength(isPSB ? cursor.u64() : UInt64(cursor.u32()))
-        let layerSectionEnd = cursor.offset + layerSection
-        guard layerSection >= 4 else {
+        let layerSectionEnd = try cursor.checkedAdvance(layerSection)
+        guard layerSection >= (isPSB ? 8 : 4) else {
             return PSDDocument(width: canvasWidth, height: canvasHeight, resolution: resolution, layers: [])
         }
         let layerInfoLength = try checkedLength(isPSB ? cursor.u64() : UInt64(cursor.u32()))
-        _ = layerInfoLength
-        let rawCount = try cursor.i16()
+        let layerInfoEnd = try cursor.checkedAdvance(layerInfoLength, limit: layerSectionEnd)
+        let rawCount = try cursor.i16(limit: layerInfoEnd)
         let count = abs(Int(rawCount))
         guard count <= 10_000 else { throw ImageImportError.tooLarge }
         var raw = [RawLayer]()
         raw.reserveCapacity(count)
-        for _ in 0..<count { raw.append(try readRecord(&cursor, isPSB: isPSB)) }
+        for _ in 0..<count { raw.append(try readRecord(&cursor, isPSB: isPSB, limit: layerInfoEnd)) }
         if !fitsBudget(raw, remainingPixels: remainingPixels) {
             for index in raw.indices {
                 cropToCanvas(&raw[index], width: canvasWidth, height: canvasHeight)
             }
             guard fitsBudget(raw, remainingPixels: remainingPixels) else { throw ImageImportError.tooLarge }
         }
-        var usedPixels = 0
+        let budget = max(0, remainingPixels), maskBudget = budget
+        var usedPixels = 0, usedMaskPixels = 0
         for index in raw.indices {
-            try decodeChannels(&cursor, layer: &raw[index], remainingPixels: remainingPixels - usedPixels, isPSB: isPSB)
-            if let image = raw[index].image { usedPixels += image.width * image.height }
+            try decodeChannels(&cursor, layer: &raw[index], remainingPixels: budget - usedPixels,
+                               remainingMaskPixels: maskBudget - usedMaskPixels, isPSB: isPSB, limit: layerInfoEnd)
+            if let image = raw[index].image {
+                let pixels = pixelCount(width: image.width, height: image.height) ?? 0
+                guard pixels <= budget - usedPixels else { throw ImageImportError.tooLarge }
+                usedPixels += pixels
+            }
+            if raw[index].hasMask {
+                let maskWidth = max(0, raw[index].maskRight - raw[index].maskLeft)
+                let maskHeight = max(0, raw[index].maskBottom - raw[index].maskTop)
+                let pixels = pixelCount(width: maskWidth, height: maskHeight) ?? 0
+                guard pixels <= maskBudget - usedMaskPixels else { throw ImageImportError.tooLarge }
+                usedMaskPixels += pixels
+            }
         }
         cursor.offset = layerSectionEnd
         return PSDDocument(width: canvasWidth, height: canvasHeight, resolution: resolution,
                            layers: try assemble(raw, canvas: CGSize(width: canvasWidth, height: canvasHeight),
-                                                remainingPixels: remainingPixels - usedPixels))
+                                                remainingPixels: budget - usedPixels))
     }
 
     private struct RawLayer {
@@ -125,77 +141,88 @@ nonisolated enum PSDReader {
     private static let psbLargeAdditionalInfoKeys: Set<String> = [
         "LMsk", "Lr16", "Lr32", "Layr", "Mt16", "Mt32", "Mtrn", "Alph", "FMsk", "lnk2", "FEid", "FXid", "PxSD"
     ]
+    private static let maxAdditionalInfoBytes = 16_000_000
 
     private static func checkedLength(_ value: UInt64) throws -> Int {
         guard value <= UInt64(Int.max) else { throw ImageImportError.tooLarge }
         return Int(value)
     }
 
-    private static func readRecord(_ cursor: inout PSDCursor, isPSB: Bool) throws -> RawLayer {
+    private static func readRecord(_ cursor: inout PSDCursor, isPSB: Bool, limit: Int) throws -> RawLayer {
         var layer = RawLayer()
-        layer.top = Int(try cursor.i32())
-        layer.left = Int(try cursor.i32())
-        layer.bottom = Int(try cursor.i32())
-        layer.right = Int(try cursor.i32())
+        layer.top = Int(try cursor.i32(limit: limit))
+        layer.left = Int(try cursor.i32(limit: limit))
+        layer.bottom = Int(try cursor.i32(limit: limit))
+        layer.right = Int(try cursor.i32(limit: limit))
         layer.sourceTop = layer.top
         layer.sourceLeft = layer.left
         layer.sourceBottom = layer.bottom
         layer.sourceRight = layer.right
-        let channelCount = Int(try cursor.u16())
+        let channelCount = Int(try cursor.u16(limit: limit))
         guard channelCount <= 56 else { throw ImageImportError.tooLarge }
         for _ in 0..<channelCount {
-            let id = Int(try cursor.i16())
-            let length = try checkedLength(isPSB ? cursor.u64() : UInt64(cursor.u32()))
+            let id = Int(try cursor.i16(limit: limit))
+            let length = try checkedLength(isPSB ? cursor.u64(limit: limit) : UInt64(cursor.u32(limit: limit)))
             layer.channels.append((id, length))
         }
-        guard try cursor.string(4) == "8BIM" else { throw PSDError.truncated }
-        layer.blendKey = try cursor.string(4)
-        layer.opacity = try cursor.u8()
-        layer.clipping = try cursor.u8() != 0
-        let flags = try cursor.u8()
+        guard try cursor.string(4, limit: limit) == "8BIM" else { throw PSDError.truncated }
+        layer.blendKey = try cursor.string(4, limit: limit)
+        layer.opacity = try cursor.u8(limit: limit)
+        layer.clipping = try cursor.u8(limit: limit) != 0
+        let flags = try cursor.u8(limit: limit)
         layer.hidden = (flags & 2) != 0
-        try cursor.skip(1)
-        let extraLength = Int(try cursor.u32())
-        let extraEnd = cursor.offset + extraLength
-        let maskLength = Int(try cursor.u32())
-        let maskEnd = cursor.offset + maskLength
+        try cursor.skip(1, limit: limit)
+        let extraLength = try checkedLength(UInt64(try cursor.u32(limit: limit)))
+        let extraEnd = try cursor.checkedAdvance(extraLength, limit: limit)
+        let maskLength = try checkedLength(UInt64(try cursor.u32(limit: extraEnd)))
+        let maskEnd = try cursor.checkedAdvance(maskLength, limit: extraEnd)
         if maskLength >= 20 {
             layer.hasMask = true
-            layer.maskTop = Int(try cursor.i32())
-            layer.maskLeft = Int(try cursor.i32())
-            layer.maskBottom = Int(try cursor.i32())
-            layer.maskRight = Int(try cursor.i32())
+            layer.maskTop = Int(try cursor.i32(limit: maskEnd))
+            layer.maskLeft = Int(try cursor.i32(limit: maskEnd))
+            layer.maskBottom = Int(try cursor.i32(limit: maskEnd))
+            layer.maskRight = Int(try cursor.i32(limit: maskEnd))
             layer.sourceMaskTop = layer.maskTop
             layer.sourceMaskLeft = layer.maskLeft
             layer.sourceMaskBottom = layer.maskBottom
             layer.sourceMaskRight = layer.maskRight
-            layer.maskDefault = try cursor.u8()
-            let maskFlags = try cursor.u8()
+            layer.maskDefault = try cursor.u8(limit: maskEnd)
+            let maskFlags = try cursor.u8(limit: maskEnd)
             layer.maskDisabled = (maskFlags & 2) != 0
             layer.maskLinked = (maskFlags & 1) == 0
             layer.maskFromRender = (maskFlags & 8) != 0
         }
         cursor.offset = maskEnd
-        let ranges = Int(try cursor.u32())
-        try cursor.skip(ranges)
-        let nameCount = Int(try cursor.u8())
-        let nameBytes = try cursor.bytes(nameCount)
+        let ranges = try checkedLength(UInt64(try cursor.u32(limit: extraEnd)))
+        try cursor.skip(ranges, limit: extraEnd)
+        let nameCount = Int(try cursor.u8(limit: extraEnd))
+        let nameBytes = try cursor.bytes(nameCount, limit: extraEnd)
         layer.name = String(bytes: nameBytes, encoding: .macOSRoman) ?? String(bytes: nameBytes, encoding: .isoLatin1) ?? "Layer"
         let namePad = (4 - ((nameCount + 1) % 4)) % 4
-        try cursor.skip(namePad)
-        while cursor.offset + 12 <= extraEnd {
-            let signature = try cursor.string(4)
+        try cursor.skip(namePad, limit: extraEnd)
+        var additionalInfoBytes = 0
+        while cursor.offset <= extraEnd, extraEnd - cursor.offset >= 12 {
+            let signature = try cursor.string(4, limit: extraEnd)
             guard signature == "8BIM" || signature == "8B64" else { break }
-            let key = try cursor.string(4)
+            let key = try cursor.string(4, limit: extraEnd)
+            let large = signature == "8B64" || (isPSB && psbLargeAdditionalInfoKeys.contains(key))
             let length: Int
-            if signature == "8B64" || (isPSB && psbLargeAdditionalInfoKeys.contains(key)) {
-                guard cursor.offset + 8 <= extraEnd else { break }
-                length = try checkedLength(cursor.u64())
+            if large {
+                length = try checkedLength(try cursor.u64(limit: extraEnd))
             } else {
-                length = Int(try cursor.u32())
+                length = try checkedLength(UInt64(try cursor.u32(limit: extraEnd)))
             }
-            let payload = try cursor.bytes(length)
-            if length % 2 == 1 { try cursor.skip(1) }
+            let headerLength = large ? 16 : 12
+            guard headerLength <= maxAdditionalInfoBytes - additionalInfoBytes else { throw ImageImportError.tooLarge }
+            additionalInfoBytes += headerLength
+            guard length <= maxAdditionalInfoBytes - additionalInfoBytes else { throw ImageImportError.tooLarge }
+            additionalInfoBytes += length
+            let payload = try cursor.bytes(length, limit: extraEnd)
+            if length % 2 == 1 {
+                guard additionalInfoBytes < maxAdditionalInfoBytes else { throw ImageImportError.tooLarge }
+                additionalInfoBytes += 1
+                try cursor.skip(1, limit: extraEnd)
+            }
             layer.extra[key] = payload
             if key == "luni", let unicode = unicodeName(payload) { layer.name = unicode }
             if key == "iOpa", let fill = payload.first { layer.fill = fill }
@@ -210,7 +237,7 @@ nonisolated enum PSDReader {
     private static func unicodeName(_ data: Data) -> String? {
         guard data.count >= 4 else { return nil }
         let count = Int(u32(data, 0))
-        guard count > 0, data.count >= 4 + count * 2 else { return nil }
+        guard count > 0, count <= (data.count - 4) / 2 else { return nil }
         var units = [UInt16]()
         units.reserveCapacity(count)
         for i in 0..<count {
@@ -223,28 +250,43 @@ nonisolated enum PSDReader {
     /// Transparency, R, G, B, and the user mask. Spot and other extra IDs are skipped before decode.
     private static let unpackedChannelIDs: Set<Int> = [-1, 0, 1, 2, -2]
 
+    /// Image pixels and mask pixels are budgeted apart, the way a saved project holds them
+    /// (`ProjectStore.checkSize`), so a document can import exactly what it could open.
     private static func fitsBudget(_ layers: [RawLayer], remainingPixels: Int) -> Bool {
-        var usedPixels = 0
+        let budget = max(0, remainingPixels)
+        var usedPixels = 0, usedMaskPixels = 0
         for layer in layers {
             let width = max(0, layer.right - layer.left)
             let height = max(0, layer.bottom - layer.top)
             let maskWidth = max(0, layer.maskRight - layer.maskLeft)
             let maskHeight = max(0, layer.maskBottom - layer.maskTop)
             guard fitsBudget(width: width, height: height, maskWidth: maskWidth, maskHeight: maskHeight,
-                             hasMask: layer.hasMask, remainingPixels: remainingPixels - usedPixels) else { return false }
-            if width > 0, height > 0 { usedPixels += width * height }
+                             hasMask: layer.hasMask, remainingPixels: budget - usedPixels,
+                             remainingMaskPixels: budget - usedMaskPixels) else { return false }
+            if width > 0, height > 0 { usedPixels += pixelCount(width: width, height: height) ?? Int.max }
+            if layer.hasMask, maskWidth > 0, maskHeight > 0 {
+                usedMaskPixels += pixelCount(width: maskWidth, height: maskHeight) ?? Int.max
+            }
         }
         return true
     }
 
     private static func fitsBudget(width: Int, height: Int, maskWidth: Int, maskHeight: Int, hasMask: Bool,
-                                   remainingPixels: Int) -> Bool {
-        let budget = max(0, remainingPixels)
-        if width > 0, height > 0,
-           !(width <= DocumentLimits.maxSide && height <= DocumentLimits.maxSide && width * height <= budget) { return false }
-        if hasMask, maskWidth > 0, maskHeight > 0,
-           !(maskWidth <= DocumentLimits.maxSide && maskHeight <= DocumentLimits.maxSide && maskWidth * maskHeight <= budget) { return false }
+                                   remainingPixels: Int, remainingMaskPixels: Int) -> Bool {
+        if width > 0, height > 0, let pixels = pixelCount(width: width, height: height) {
+            guard pixels <= max(0, remainingPixels) else { return false }
+        }
+        if hasMask, maskWidth > 0, maskHeight > 0, let pixels = pixelCount(width: maskWidth, height: maskHeight) {
+            guard pixels <= max(0, remainingMaskPixels) else { return false }
+        }
         return true
+    }
+
+    private static func pixelCount(width: Int, height: Int) -> Int? {
+        guard width >= 0, height >= 0, width <= DocumentLimits.maxSide, height <= DocumentLimits.maxSide else { return nil }
+        if width == 0 || height == 0 { return 0 }
+        guard width <= Int.max / height else { return nil }
+        return width * height
     }
 
     private static func cropToCanvas(_ layer: inout RawLayer, width: Int, height: Int) {
@@ -280,24 +322,26 @@ nonisolated enum PSDReader {
                        width: croppedRight - croppedLeft, height: croppedBottom - croppedTop)
     }
 
-    private static func decodeChannels(_ cursor: inout PSDCursor, layer: inout RawLayer, remainingPixels: Int, isPSB: Bool) throws {
+    private static func decodeChannels(_ cursor: inout PSDCursor, layer: inout RawLayer, remainingPixels: Int, remainingMaskPixels: Int, isPSB: Bool, limit: Int) throws {
         var planes: [Int: [UInt8]] = [:]
         let width = max(0, layer.right - layer.left)
         let height = max(0, layer.bottom - layer.top)
         let maskWidth = max(0, layer.maskRight - layer.maskLeft)
         let maskHeight = max(0, layer.maskBottom - layer.maskTop)
         guard fitsBudget(width: width, height: height, maskWidth: maskWidth, maskHeight: maskHeight,
-                         hasMask: layer.hasMask, remainingPixels: remainingPixels) else { throw ImageImportError.tooLarge }
+                         hasMask: layer.hasMask, remainingPixels: remainingPixels,
+                         remainingMaskPixels: remainingMaskPixels) else { throw ImageImportError.tooLarge }
         let sourceWidth = max(0, layer.sourceRight - layer.sourceLeft)
         let sourceHeight = max(0, layer.sourceBottom - layer.sourceTop)
         let sourceMaskWidth = max(0, layer.sourceMaskRight - layer.sourceMaskLeft)
         let sourceMaskHeight = max(0, layer.sourceMaskBottom - layer.sourceMaskTop)
         for channel in layer.channels {
-            let start = cursor.offset
-            defer { cursor.offset = start + max(0, channel.length) }
+            let channelEnd = try cursor.checkedAdvance(channel.length, limit: limit)
+            defer { cursor.offset = channelEnd }
             guard unpackedChannelIDs.contains(channel.id), channel.length >= 2 else { continue }
-            let compression = Int(try cursor.u16())
-            let payload = try cursor.bytes(channel.length - 2)
+            let compression = Int(try cursor.u16(limit: channelEnd))
+            let payload = try cursor.bytes(channel.length - 2, limit: channelEnd)
+
             let isMask = channel.id == -2
             let sourceW = isMask ? sourceMaskWidth : sourceWidth
             let sourceH = isMask ? sourceMaskHeight : sourceHeight
@@ -309,17 +353,19 @@ nonisolated enum PSDReader {
                                                                  data: payload, largeDocument: isPSB, crop: crop)
             }
         }
-        if layer.hasMask, maskWidth > 0, maskHeight > 0, let gray = planes[-2], gray.count >= maskWidth * maskHeight {
+        let maskPixels = pixelCount(width: maskWidth, height: maskHeight) ?? 0
+        if layer.hasMask, maskWidth > 0, maskHeight > 0, let gray = planes[-2], gray.count >= maskPixels {
             layer.maskImage = try PSDChannelCoder.maskImage(width: maskWidth, height: maskHeight, gray: gray)
         }
         guard width > 0, height > 0 else { return }
-        let opaque = [UInt8](repeating: 255, count: width * height)
-        let black = [UInt8](repeating: 0, count: width * height)
+        let imagePixels = pixelCount(width: width, height: height) ?? 0
+        let opaque = [UInt8](repeating: 255, count: imagePixels)
+        let black = [UInt8](repeating: 0, count: imagePixels)
         let red = planes[0] ?? black
         let green = planes[1] ?? black
         let blue = planes[2] ?? black
         let alpha = planes[-1] ?? opaque
-        guard red.count >= width * height, green.count >= width * height, blue.count >= width * height, alpha.count >= width * height else {
+        guard red.count >= imagePixels, green.count >= imagePixels, blue.count >= imagePixels, alpha.count >= imagePixels else {
             throw PSDError.truncated
         }
         layer.image = try PSDChannelCoder.rgbaImage(width: width, height: height, red: red, green: green, blue: blue, alpha: alpha)
@@ -356,7 +402,7 @@ nonisolated enum PSDReader {
                 : CGRect(x: layer.left, y: layer.top,
                          width: max(0, layer.right - layer.left), height: max(0, layer.bottom - layer.top))
             record.image = isGroup ? nil : layer.image
-            if record.kind == .text, let text = PSDText.parse(extra: layer.extra) {
+            if record.kind == .text, let text = try PSDText.parseChecked(extra: layer.extra) {
                 record.text = text
             } else if !isGroup, let live = try PSDVector.live(extra: layer.extra, canvas: canvas, remainingPixels: remaining) {
                 record.image = live.image
@@ -364,12 +410,14 @@ nonisolated enum PSDReader {
                 record.shape = live.style
                 record.shapeNotes = live.notes
                 record.kind = .vector
-                remaining = max(0, remaining - live.image.width * live.image.height)
+                guard let pixels = pixelCount(width: live.image.width, height: live.image.height) else { throw ImageImportError.tooLarge }
+                remaining = max(0, remaining - pixels)
             } else if record.image == nil, !isGroup, let raster = try PSDVector.raster(extra: layer.extra, canvas: canvas, remainingPixels: remaining) {
                 record.image = raster.image
                 record.bounds = raster.bounds
                 record.kind = .vector
-                remaining = max(0, remaining - raster.image.width * raster.image.height)
+                guard let pixels = pixelCount(width: raster.image.width, height: raster.image.height) else { throw ImageImportError.tooLarge }
+                remaining = max(0, remaining - pixels)
             }
             record.mask = layer.maskFromRender ? nil : layer.maskImage
             record.maskEnabled = !layer.maskDisabled
@@ -406,53 +454,59 @@ nonisolated private struct PSDCursor: Sendable {
     let data: Data
     var offset = 0
 
-    mutating func need(_ count: Int) throws {
-        guard offset >= 0, offset + count <= data.count else { throw PSDError.truncated }
+    func checkedAdvance(_ count: Int, limit: Int? = nil) throws -> Int {
+        guard count >= 0, offset >= 0, offset <= data.count else { throw PSDError.truncated }
+        let upper = min(data.count, limit ?? data.count)
+        guard offset <= upper, count <= upper - offset else { throw PSDError.truncated }
+        return offset + count
     }
 
-    mutating func skip(_ count: Int) throws {
-        guard count >= 0 else { throw PSDError.truncated }
-        try need(count)
-        offset += count
+    mutating func need(_ count: Int, limit: Int? = nil) throws {
+        _ = try checkedAdvance(count, limit: limit)
     }
 
-    mutating func u8() throws -> UInt8 {
-        try need(1)
-        defer { offset += 1 }
+    mutating func skip(_ count: Int, limit: Int? = nil) throws {
+        offset = try checkedAdvance(count, limit: limit)
+    }
+
+    mutating func u8(limit: Int? = nil) throws -> UInt8 {
+        let end = try checkedAdvance(1, limit: limit)
+        defer { offset = end }
         return data[offset]
     }
 
-    mutating func u16() throws -> UInt16 {
-        try need(2)
-        defer { offset += 2 }
+    mutating func u16(limit: Int? = nil) throws -> UInt16 {
+        let end = try checkedAdvance(2, limit: limit)
+        defer { offset = end }
         return UInt16(data[offset]) << 8 | UInt16(data[offset + 1])
     }
 
-    mutating func i16() throws -> Int16 { Int16(bitPattern: try u16()) }
+    mutating func i16(limit: Int? = nil) throws -> Int16 { Int16(bitPattern: try u16(limit: limit)) }
 
-    mutating func u32() throws -> UInt32 {
-        try need(4)
-        defer { offset += 4 }
+    mutating func u32(limit: Int? = nil) throws -> UInt32 {
+        let end = try checkedAdvance(4, limit: limit)
+        defer { offset = end }
         return UInt32(data[offset]) << 24 | UInt32(data[offset + 1]) << 16 | UInt32(data[offset + 2]) << 8 | UInt32(data[offset + 3])
     }
 
-    mutating func u64() throws -> UInt64 {
-        try need(8)
-        defer { offset += 8 }
+    mutating func u64(limit: Int? = nil) throws -> UInt64 {
+        let end = try checkedAdvance(8, limit: limit)
+        defer { offset = end }
         return UInt64(data[offset]) << 56 | UInt64(data[offset + 1]) << 48 | UInt64(data[offset + 2]) << 40 | UInt64(data[offset + 3]) << 32 |
             UInt64(data[offset + 4]) << 24 | UInt64(data[offset + 5]) << 16 | UInt64(data[offset + 6]) << 8 | UInt64(data[offset + 7])
     }
 
-    mutating func i32() throws -> Int32 { Int32(bitPattern: try u32()) }
+    mutating func i32(limit: Int? = nil) throws -> Int32 { Int32(bitPattern: try u32(limit: limit)) }
 
-    mutating func bytes(_ count: Int) throws -> Data {
-        try need(count)
-        defer { offset += count }
-        return data.subdata(in: offset ..< offset + count)
+    mutating func bytes(_ count: Int, limit: Int? = nil) throws -> Data {
+        let end = try checkedAdvance(count, limit: limit)
+        let slice = data.subdata(in: offset ..< end)
+        offset = end
+        return slice
     }
 
-    mutating func string(_ count: Int) throws -> String {
-        let bytes = try bytes(count)
+    mutating func string(_ count: Int, limit: Int? = nil) throws -> String {
+        let bytes = try bytes(count, limit: limit)
         return String(bytes: bytes, encoding: .ascii) ?? ""
     }
 }

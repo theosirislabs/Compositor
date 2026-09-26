@@ -202,6 +202,7 @@ actor ProjectStore {
                 // Letters in their own colors arrived in version 10.
                 guard text.isValid, text.colorRuns == nil || manifest.version >= 10, layer.imageFile != nil, layer.isGroup != true, layer.adjustment == nil else { throw ProjectError.invalid }
             }
+            guard layer.effects?.isValid ?? true, layer.shape?.isValid ?? true else { throw ProjectError.invalid }
             if let adjustment = layer.adjustment {
                 guard manifest.version >= 7, layer.isGroup != true, layer.imageFile == nil, adjustment.isValid else { throw ProjectError.invalid }
                 if adjustment.kind == .gaussianBlur || adjustment.kind == .motionBlur || adjustment.kind == .addNoise {

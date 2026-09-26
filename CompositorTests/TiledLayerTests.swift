@@ -237,11 +237,12 @@ struct TiledLayerTests {
         session.brushSettings.diameter = 30
 
         struct Snapshot { let bytes: [UInt8]; let width: Int; let height: Int; let rowBytes: Int; let samples: Int }
+        struct SnapshotUnavailable: Error {}
         func snapshot() throws -> Snapshot {
             view.synchronizeDisplay()
-            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ExportError.render }
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw SnapshotUnavailable() }
             view.cacheDisplay(in: view.bounds, to: rep)
-            guard let data = rep.bitmapData else { throw ExportError.render }
+            guard let data = rep.bitmapData else { throw SnapshotUnavailable() }
             return Snapshot(bytes: Array(UnsafeBufferPointer(start: data, count: rep.bytesPerRow * rep.pixelsHigh)),
                             width: rep.pixelsWide, height: rep.pixelsHigh, rowBytes: rep.bytesPerRow, samples: rep.bitsPerPixel / 8)
         }

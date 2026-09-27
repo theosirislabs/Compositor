@@ -43,8 +43,8 @@ extension ProjectController {
             externalChanges.pending = false
             guard let url = session.projectURL, session.document != nil, !externalChanges.saving else { return }
             // Compare content, not modification dates: sync clients touch metadata without changing anything.
-            guard let digest = await Task.detached(priority: .utility) { try? ProjectDigest.compute(for: url) }.value,
-                  digest != externalChanges.knownDigest else { continue }
+            let computed = await Task.detached(priority: .utility) { try? ProjectDigest.compute(for: url) }.value
+            guard let digest = computed, digest != externalChanges.knownDigest else { continue }
             // Wait for an edit in progress to finish rather than pulling the document out from under it.
             guard session.canStartProjectOperation, session.transformEdit == nil, workspace?.isManaging != true else {
                 scheduleRecheck(); return

@@ -27,9 +27,9 @@ nonisolated enum DocumentLimits {
     /// `maxSurfacePixels` for the paths that measure in CGFloat.
     static let maxSurfaceExtent = CGFloat(maxSurfacePixels)
 
-    /// Total imported raster one document may hold, summed across every layer and mask. Only
-    /// documents that genuinely contain this much ever reach it, so the ceiling costs nothing to
-    /// the small documents that never approach it.
+    /// Total imported raster one document may hold. Image pixels and mask pixels are each held to
+    /// this, the way a project reads them back. Only documents that genuinely contain this much
+    /// ever reach it, so the ceiling costs nothing to the small documents that never approach it.
     ///
     /// Scaled to the Mac: a quarter of its memory at 4 bytes a pixel (about 537 MP on 8 GB), never less than
     /// one surface and never more than 800 MP (3.2 GB of layers), which a 16 GB Mac already reaches.

@@ -20,7 +20,7 @@ brew install --cask robbietilton-compositor
 ## Features
 
 ### Layers
-- Layers and folders, with opacity and Photoshop's full set of blend modes in its order — a folder's opacity dims everything inside it
+- Layers and folders, with opacity and Photoshop's blend modes in their order — Darker Color and Lighter Color are the two left out — a folder's opacity dims everything inside it
 - Layer masks: paint, fill, invert, blur and feather them anywhere on the canvas, past the layer's own pixels; link or unlink them to transform a mask on its own
 - Clipping masks and folder masks
 - Adjustment layers: Hue/Saturation, Levels, Curves, Exposure, Gradient Map, Grain, Black & White, Color Balance, Invert, Gaussian Blur, Motion Blur and Noise

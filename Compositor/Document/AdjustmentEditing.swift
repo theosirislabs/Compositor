@@ -19,7 +19,10 @@ extension EditorSession {
         let source = ProjectSnapshot(manifest: manifest, images: snapshot.images, masks: snapshot.masks)
         do {
             let raster = try await ImageExporter.shared.render(source)
-            guard !Task.isCancelled, adjustmentEditingID == id, adjustmentOriginal == nil else { return }
+            guard adjustmentEditingID == id, adjustmentOriginal == nil else { return }
+            // A cancelled render has installed no editor, so nothing else would ever clear the id
+            // and the session would refuse every project operation from here on.
+            guard !Task.isCancelled else { adjustmentEditingID = nil; return }
             let asset = ImportedImage(image: raster.image, thumbnail: try PixelAdjust.thumbnail(of: raster.image), name: "Adjustment input")
             let layer = ImageLayer(asset: asset, origin: .zero)
             switch original.kind {

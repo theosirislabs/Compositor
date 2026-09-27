@@ -140,4 +140,182 @@ struct ImageImportTests {
         #expect(session.document?.layers.map(\.name) == [first, second].map { $0.deletingPathExtension().lastPathComponent })
         #expect(session.importError == nil)
     }
+
+    /// A 200×100 page with its bottom-right quadrant painted red; the rest is unpainted paper.
+    func pdfFixture(pages: Int = 1) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("pdf")
+        var mediaBox = CGRect(x: 0, y: 0, width: 200, height: 100)
+        guard let consumer = CGDataConsumer(url: url as CFURL),
+              let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { throw ImageImportError.unreadable }
+        for _ in 0..<pages {
+            context.beginPDFPage(nil)
+            context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+            context.fill(CGRect(x: 100, y: 0, width: 100, height: 50))
+            context.endPDFPage()
+        }
+        context.closePDF()
+        return url
+    }
+
+    /// One pixel, rows counted from the image's top, through the same buffer layout the PNG transparency test reads.
+    func rgba(_ image: CGImage, x: Int, y: Int) throws -> [UInt8] {
+        let context = try #require(CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                             bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        let bytes = try #require(context.data).assumingMemoryBound(to: UInt8.self)
+        let offset = (y * image.width + x) * 4
+        return [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]
+    }
+
+    /// A page whose crop and trim boxes are smaller than its media box, written by hand because
+    /// CoreGraphics will not record the extra boxes.
+    func boxedFixture() throws -> URL {
+        let content = "0 0 1 rg\n0 0 200 100 re\nf\n"
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /CropBox [0 0 100 50] /TrimBox [0 0 120 60] /Contents 4 0 R /Resources << /ProcSet [/PDF] >> >>",
+            "<< /Length \(content.utf8.count) >>\nstream\n\(content)endstream"
+        ]
+        var pdf = "%PDF-1.4\n"
+        var offsets: [Int] = []
+        for (index, object) in objects.enumerated() {
+            offsets.append(pdf.utf8.count)
+            pdf += "\(index + 1) 0 obj\n\(object)\nendobj\n"
+        }
+        let xref = pdf.utf8.count
+        pdf += "xref\n0 \(objects.count + 1)\n0000000000 65535 f \n"
+        for offset in offsets { pdf += String(format: "%010d 00000 n \n", offset) }
+        pdf += "trailer\n<< /Size \(objects.count + 1) /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("pdf")
+        try Data(pdf.utf8).write(to: url)
+        return url
+    }
+
+    @Test func pdfCropBoxChoosesThePageBox() async throws {
+        let url = try boxedFixture()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var media = PDFImportOptions()
+        media.box = .media
+        let whole = try await ImageImporter.shared.decodePDF(url, options: media)
+        #expect(whole[0].image.width == 200)
+        #expect(whole[0].image.height == 100)
+        var trim = PDFImportOptions()
+        trim.box = .trim
+        let finished = try await ImageImporter.shared.decodePDF(url, options: trim)
+        #expect(finished[0].image.width == 120)
+        #expect(finished[0].image.height == 60)
+        // Crop is the default, and is what a viewer shows.
+        let cropped = try await ImageImporter.shared.decodePDF(url)
+        #expect(cropped[0].image.width == 100)
+        #expect(cropped[0].image.height == 50)
+    }
+
+    @Test func pageNotationSelectsPages() {
+        #expect(PDFImportOptions.parse("", pageCount: 3) == [1, 2, 3])
+        #expect(PDFImportOptions.parse("2", pageCount: 3) == [2])
+        #expect(PDFImportOptions.parse("1-2", pageCount: 4) == [1, 2])
+        #expect(PDFImportOptions.parse("2-4, 1", pageCount: 5) == [1, 2, 3, 4])
+        #expect(PDFImportOptions.parse("1-2, 2", pageCount: 3) == [1, 2])
+        #expect(PDFImportOptions.parse("2-1", pageCount: 3) == [1, 2])
+        #expect(PDFImportOptions.parse("9", pageCount: 3) == nil)
+        #expect(PDFImportOptions.parse("two", pageCount: 3) == nil)
+        #expect(PDFImportOptions.parse("1-", pageCount: 3) == nil)
+    }
+
+    @Test func pdfImportRendersEachPage() async throws {
+        let url = try pdfFixture(pages: 2)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let pages = try await ImageImporter.shared.decodePDF(url)
+        #expect(pages.count == 2)
+        #expect(pages[0].image.width == 200)
+        #expect(pages[0].image.height == 100)
+        #expect(pages[0].name == "\(url.deletingPathExtension().lastPathComponent) — Page 1")
+        #expect(pages[1].name == "\(url.deletingPathExtension().lastPathComponent) — Page 2")
+        #expect(pages[0].thumbnail.width <= 96)
+        // Painted bottom-right in the PDF lands bottom-right in the pixels, not flipped.
+        let painted = try rgba(pages[0].image, x: 150, y: 75)
+        #expect(painted[0] >= 250 && painted[3] == 255)
+        // The paper behind it is white, as a page reads.
+        let paper = try rgba(pages[0].image, x: 150, y: 25)
+        #expect(paper[0] >= 250 && paper[1] >= 250 && paper[2] >= 250 && paper[3] == 255)
+    }
+
+    @Test func pdfResolutionSetsThePixelSize() async throws {
+        let url = try pdfFixture()
+        defer { try? FileManager.default.removeItem(at: url) }
+        // 72 ppi reads a point as a pixel; 300 ppi reads the same page at print size.
+        var fine = PDFImportOptions()
+        fine.resolution = 300
+        let printed = try await ImageImporter.shared.decodePDF(url, options: fine)
+        #expect(printed[0].image.width == 833)
+        #expect(printed[0].image.height == 417)
+        var middle = PDFImportOptions()
+        middle.resolution = 150
+        let half = try await ImageImporter.shared.decodePDF(url, options: middle)
+        #expect(half[0].image.width == 417)
+        #expect(half[0].image.height == 208)
+    }
+
+    @Test func pdfBackgroundAndPageChoiceAreHonored() async throws {
+        let url = try pdfFixture(pages: 3)
+        defer { try? FileManager.default.removeItem(at: url) }
+        var transparent = PDFImportOptions()
+        transparent.paper = .transparent
+        let placed = try await ImageImporter.shared.decodePDF(url, options: transparent)
+        #expect(placed[0].image.width == 200)
+        // Placed over work, unpainted paper leaves nothing behind.
+        let paper = try rgba(placed[0].image, x: 150, y: 25)
+        #expect(paper[3] == 0)
+        var second = PDFImportOptions()
+        second.pages = "2"
+        let one = try await ImageImporter.shared.decodePDF(url, options: second)
+        #expect(one.count == 1)
+        #expect(one[0].name == "\(url.deletingPathExtension().lastPathComponent) — Page 2")
+        var third = PDFImportOptions()
+        third.pages = "3"
+        let named = try await ImageImporter.shared.decodePDF(url, options: third)
+        #expect(named[0].name == "\(url.deletingPathExtension().lastPathComponent) — Page 3")
+    }
+
+    @Test func pdfImportHonorsTheDocumentBudget() async throws {
+        let url = try pdfFixture(pages: 2)
+        defer { try? FileManager.default.removeItem(at: url) }
+        do {
+            _ = try await ImageImporter.shared.decodePDF(url, remainingPixels: 10_000)
+            Issue.record("A page over the remaining budget should fail")
+        } catch ImageImportError.tooLarge { }
+        var fine = PDFImportOptions()
+        fine.resolution = 300
+        let preview = PDFImportPreview.read(url, options: fine)
+        #expect(preview.pageCount == 2)
+        #expect(preview.selected == [1, 2])
+        #expect(preview.pixelRange == "833 × 417 pixels")
+        #expect(preview.totalPixels == 2 * 833 * 417)
+    }
+
+    @Test func pdfReachesTheSessionAsLayers() async throws {
+        let url = try pdfFixture(pages: 2)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let session = EditorSession()
+        session.confirmPDFImport = { _, options in options }
+        await session.importImages([url])
+        #expect(session.importError == nil)
+        #expect(session.document?.size == CGSize(width: 200, height: 100))
+        #expect(session.document?.layers.count == 2)
+    }
+
+    @Test func cancellingThePDFSheetImportsNothing() async throws {
+        let url = try pdfFixture(pages: 2)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let session = EditorSession()
+        session.confirmPDFImport = { _, _ in nil }
+        await session.importImages([url])
+        #expect(session.document == nil)
+        #expect(session.importError == nil)
+        #expect(!session.isImporting)
+    }
 }

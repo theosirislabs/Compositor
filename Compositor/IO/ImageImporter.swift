@@ -17,7 +17,7 @@ nonisolated enum ImageImportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unreadable: "The image could not be read. It may be damaged or unavailable."
-        case .unsupported: "Choose a JPEG, PNG, HEIC, TIFF, or Photoshop (PSD) file."
+        case .unsupported: "Choose a JPEG, PNG, HEIC, TIFF, PDF, or Photoshop (PSD) file."
         case .tooLarge: "This import exceeds the current \(DocumentLimits.documentBudgetMegapixels)-megapixel document budget or \(DocumentLimits.maxSide.formatted())-pixel side limit."
         }
     }
@@ -48,6 +48,50 @@ actor ImageImporter {
         NSGraphicsContext.restoreGraphicsState()
         guard let image = context.makeImage() else { throw ImageImportError.unreadable }
         return ImportedImage(image: image, thumbnail: try PixelAdjust.thumbnail(of: image), name: url.deletingPathExtension().lastPathComponent)
+    }
+
+    /// A PDF drawn once into pixels, one layer per page chosen by `options`. The page's points become
+    /// pixels at the resolution asked for, so 72 ppi reads a page one pixel per point and 300 ppi reads
+    /// it at print size. Every page is rendered before any of them is returned, so a file over the
+    /// document budget fails whole rather than half-imported.
+    func decodePDF(_ url: URL, options: PDFImportOptions = PDFImportOptions(), remainingPixels: Int = DocumentLimits.documentPixelBudget) throws -> [ImportedImage] {
+        try autoreleasepool {
+            guard let document = CGPDFDocument(url as CFURL), document.numberOfPages > 0 else { throw ImageImportError.unreadable }
+            guard let indices = PDFImportOptions.parse(options.pages, pageCount: document.numberOfPages), !indices.isEmpty else {
+                throw ImageImportError.unreadable
+            }
+            let base = url.deletingPathExtension().lastPathComponent
+            var pages: [ImportedImage] = []
+            var used = 0
+            for index in indices {
+                guard let page = document.page(at: index) else { throw ImageImportError.unreadable }
+                guard let size = options.pixelSize(page: page) else { throw ImageImportError.unreadable }
+                guard size.width <= DocumentLimits.maxSide, size.height <= DocumentLimits.maxSide, size.width * size.height <= remainingPixels - used else {
+                    throw ImageImportError.tooLarge
+                }
+                used += size.width * size.height
+                let context = try BrushRaster.context(width: size.width, height: size.height, mask: false)
+                let bounds = CGRect(x: 0, y: 0, width: size.width, height: size.height)
+                if options.paper == .white {
+                    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+                    context.fill(bounds)
+                }
+                // The layer context reads top-down; a PDF page is written bottom-up, so the drawing is
+                // turned over the way decodeSVG turns AppKit's, then the page — its /Rotate applied — is
+                // mapped onto it.
+                context.saveGState()
+                context.translateBy(x: 0, y: CGFloat(size.height))
+                context.scaleBy(x: 1, y: -1)
+                context.interpolationQuality = .high
+                context.concatenate(page.getDrawingTransform(options.box.pageBox, rect: bounds, rotate: 0, preserveAspectRatio: false))
+                context.drawPDFPage(page)
+                context.restoreGState()
+                guard let image = context.makeImage() else { throw ImageImportError.unreadable }
+                let name = document.numberOfPages == 1 ? base : "\(base) — Page \(index)"
+                pages.append(ImportedImage(image: image, thumbnail: try PixelAdjust.thumbnail(of: image), name: name))
+            }
+            return pages
+        }
     }
 
     /// `flattenedPhotoshop`: a PSD or PSB with no layer records (only a background), read as its merged image.

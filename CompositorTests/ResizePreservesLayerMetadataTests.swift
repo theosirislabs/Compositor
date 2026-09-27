@@ -83,7 +83,7 @@ struct ResizePreservesLayerMetadataTests {
     }
 
     /// A package may not carry effect or shape values the renderer would choke on; the manifest
-    /// validated neither, so a hand-edited file could reach the renderer with NaN colours.
+    /// validated neither, so a hand-edited file could reach the renderer with NaN colors.
     @Test func invalidEffectsAndShapesAreRejected() async throws {
         let (session, _, _) = try await decorated()
         let snapshot = try #require(session.projectSnapshot())

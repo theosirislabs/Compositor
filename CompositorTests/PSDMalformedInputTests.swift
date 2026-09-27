@@ -44,7 +44,7 @@ struct PSDMalformedInputTests {
             file += be32(2)
             file += be16(8)
             file += be16(3)
-            file += be32(0)          // colour mode data
+            file += be32(0)          // color mode data
             file += be32(0)          // image resources
             file += largeDocument ? be64(UInt64.max) : be32(UInt32.max)
             #expect(throws: (any Error).self) { try PSDReader.read(file) }

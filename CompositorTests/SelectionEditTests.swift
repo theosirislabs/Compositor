@@ -371,22 +371,22 @@ struct SelectionEditTests {
 
     @Test func quickOperationsNeverDimTheInterface() async throws {
         let session = makeSession()
-        session.isProjectBusy = true
+        session.beginProjectOperation()
         try await Task.sleep(for: .milliseconds(60))
-        session.isProjectBusy = false
+        session.endProjectOperation()
         #expect(!session.showsBusy)
         try await Task.sleep(for: .milliseconds(300))
         #expect(!session.showsBusy) // The short busy period never surfaced.
         // Long operations still dim. Polled rather than timed once: the suite runs in
         // parallel, so a fixed window is flaky on a loaded machine.
-        session.isProjectBusy = true
+        session.beginProjectOperation()
         var dimmed = false
         for _ in 0..<40 where !dimmed {
             try await Task.sleep(for: .milliseconds(50))
             dimmed = session.showsBusy
         }
         #expect(dimmed)
-        session.isProjectBusy = false
+        session.endProjectOperation()
         #expect(!session.showsBusy)
     }
 

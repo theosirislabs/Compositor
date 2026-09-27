@@ -66,12 +66,31 @@ nonisolated final class MetalLayerEffects: Sendable {
         BrushRaster.draw(pixels, in: CGRect(x: 0, y: 0, width: width, height: height), mask: false, context: source)
         guard let bytes = source.data else { throw ExportError.render }
         let stride = MemoryLayout<Float>.stride
+        // What is actually on. Each pass reads only the buffers its own effect filled, and the compose
+        // kernel reads them behind the same flags, so an effect that is off does not need a full-size
+        // buffer bound to its slot: at the 80 MP ceiling one of those is 320 MB, and eight of them
+        // were being allocated whatever the layer had switched on.
+        let stroke = effects.stroke.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 ? $0 : nil }
+        let shadow = effects.shadow.flatMap { $0.isEnabled && $0.opacity > 0 ? $0 : nil }
+        let overlay = effects.colorOverlay.flatMap { $0.isEnabled && $0.opacity > 0 ? $0 : nil }
+        let innerShadow = effects.innerShadow.flatMap { $0.isEnabled && $0.opacity > 0 ? $0 : nil }
+        let glow = effects.outerGlow.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 ? $0 : nil }
+        let innerGlow = effects.innerGlow.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 ? $0 : nil }
+        func buffer(_ length: Int) throws -> MTLBuffer {
+            guard let made = device.makeBuffer(length: length, options: .storageModeShared) else { throw ExportError.render }
+            return made
+        }
+        let blank = try buffer(4)
+        blank.contents().initializeMemory(as: UInt8.self, to: 0)
+        /// A slot no enabled effect reads.
+        let unused = blank
+        let anyEffect = stroke != nil || shadow != nil || overlay != nil || innerShadow != nil || glow != nil || innerGlow != nil
         guard let input = device.makeBuffer(bytes: bytes, length: count * 4, options: .storageModeShared),
-              let output = device.makeBuffer(length: count * 4, options: .storageModeShared),
-              let first = device.makeBuffer(length: count * stride, options: .storageModeShared),
-              let second = device.makeBuffer(length: count * stride, options: .storageModeShared),
-              let third = device.makeBuffer(length: count * stride, options: .storageModeShared),
               let command = queue.makeCommandBuffer(), let encoder = command.makeComputeCommandEncoder() else { throw ExportError.render }
+        let output = try buffer(count * 4)
+        let first = anyEffect ? try buffer(count * stride) : unused
+        let second = (stroke != nil || shadow != nil) ? try buffer(count * stride) : unused
+        let third = stroke != nil ? try buffer(count * stride) : unused
         let grid = MTLSize(width: width, height: height, depth: 1)
         let group = MTLSize(width: 16, height: 16, depth: 1)
         func run(_ state: MTLComputePipelineState, _ buffers: [(MTLBuffer, Int)], _ uniforms: UnsafeRawPointer, _ length: Int) {
@@ -84,10 +103,11 @@ nonisolated final class MetalLayerEffects: Sendable {
             encoder.memoryBarrier(scope: .buffers)
         }
         // first: the shape's own coverage.
-        var size = Spread(width: UInt32(width), height: UInt32(height), reach: 0, smallest: 0)
-        run(alpha, [(input, 0), (first, 1)], &size, MemoryLayout<Spread>.stride)
+        if anyEffect {
+            var size = Spread(width: UInt32(width), height: UInt32(height), reach: 0, smallest: 0)
+            run(alpha, [(input, 0), (first, 1)], &size, MemoryLayout<Spread>.stride)
+        }
 
-        let stroke = effects.stroke.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 ? $0 : nil }
         if let stroke {
             // second: the shape reached out (or pulled in) by the stroke's size; third: the ring between them.
             var spread = Spread(width: UInt32(width), height: UInt32(height),
@@ -96,7 +116,6 @@ nonisolated final class MetalLayerEffects: Sendable {
             run(spreadColumns, [(third, 0), (second, 1)], &spread, MemoryLayout<Spread>.stride)
             run(ring, [(first, 0), (second, 1), (third, 2)], &spread, MemoryLayout<Spread>.stride)
         }
-        let shadow = effects.shadow.flatMap { $0.isEnabled && $0.opacity > 0 ? $0 : nil }
         if let shadow {
             // second: the shape moved and softened.
             var moved = Shift(width: UInt32(width), height: UInt32(height),
@@ -107,19 +126,15 @@ nonisolated final class MetalLayerEffects: Sendable {
                 var blur = Blur(width: UInt32(width), height: UInt32(height), sigma: sigma,
                                 radius: UInt32(max(1, Int((sigma * 3).rounded()))))
                 // The ring is already in `third`, so the blur borrows the coverage buffer for its row pass.
-                guard let scratch = device.makeBuffer(length: count * stride, options: .storageModeShared) else { throw ExportError.render }
+                let scratch = try buffer(count * stride)
                 run(blurRows, [(second, 0), (scratch, 1)], &blur, MemoryLayout<Blur>.stride)
                 run(blurColumns, [(scratch, 0), (second, 1)], &blur, MemoryLayout<Blur>.stride)
             }
         }
-        let overlay = effects.colorOverlay.flatMap { $0.isEnabled && $0.opacity > 0 ? $0 : nil }
-        let innerShadow = effects.innerShadow.flatMap { $0.isEnabled && $0.opacity > 0 ? $0 : nil }
         var innerBuffer: MTLBuffer?
         if let innerShadow {
             // What lies outside the layer, moved and softened, kept to the layer's own shape.
-            guard let moved = device.makeBuffer(length: count * stride, options: .storageModeShared),
-                  let softened = device.makeBuffer(length: count * stride, options: .storageModeShared),
-                  let result = device.makeBuffer(length: count * stride, options: .storageModeShared) else { throw ExportError.render }
+            let moved = try buffer(count * stride), softened = try buffer(count * stride), result = try buffer(count * stride)
             var shift = Shift(width: UInt32(width), height: UInt32(height),
                               dx: Float(innerShadow.offset.width), dy: Float(innerShadow.offset.height))
             run(self.shift, [(first, 0), (moved, 1)], &shift, MemoryLayout<Shift>.stride)
@@ -134,12 +149,10 @@ nonisolated final class MetalLayerEffects: Sendable {
             run(self.inside, [(first, 0), (moved, 1), (result, 2)], &size, MemoryLayout<Spread>.stride)
             innerBuffer = result
         }
-        guard let inner = innerBuffer ?? device.makeBuffer(length: count * stride, options: .storageModeShared) else { throw ExportError.render }
-        let glow = effects.outerGlow.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 ? $0 : nil }
+        let inner = innerBuffer ?? unused
         var glowBuffer: MTLBuffer?
         if let glow {
-            guard let blurredGlow = device.makeBuffer(length: count * stride, options: .storageModeShared),
-                  let scratch = device.makeBuffer(length: count * stride, options: .storageModeShared) else { throw ExportError.render }
+            let blurredGlow = try buffer(count * stride), scratch = try buffer(count * stride)
             let sigma = Float(glow.size / 2)
             if sigma > 0.01 {
                 var blur = Blur(width: UInt32(width), height: UInt32(height), sigma: sigma,
@@ -152,13 +165,10 @@ nonisolated final class MetalLayerEffects: Sendable {
             }
             glowBuffer = blurredGlow
         }
-        guard let glowOutput = glowBuffer ?? device.makeBuffer(length: count * stride, options: .storageModeShared) else { throw ExportError.render }
-        let innerGlow = effects.innerGlow.flatMap { $0.isEnabled && $0.size > 0 && $0.opacity > 0 ? $0 : nil }
+        let glowOutput = glowBuffer ?? unused
         var innerGlowBuffer: MTLBuffer?
         if let innerGlow {
-            guard let blurredGlow = device.makeBuffer(length: count * stride, options: .storageModeShared),
-                  let scratch = device.makeBuffer(length: count * stride, options: .storageModeShared),
-                  let result = device.makeBuffer(length: count * stride, options: .storageModeShared) else { throw ExportError.render }
+            let blurredGlow = try buffer(count * stride), scratch = try buffer(count * stride), result = try buffer(count * stride)
             let sigma = Float(innerGlow.size / 2)
             if sigma > 0.01 {
                 var blur = Blur(width: UInt32(width), height: UInt32(height), sigma: sigma,
@@ -173,7 +183,7 @@ nonisolated final class MetalLayerEffects: Sendable {
             run(inside, [(first, 0), (blurredGlow, 1), (result, 2)], &size, MemoryLayout<Spread>.stride)
             innerGlowBuffer = result
         }
-        guard let innerGlowOutput = innerGlowBuffer ?? device.makeBuffer(length: count * stride, options: .storageModeShared) else { throw ExportError.render }
+        let innerGlowOutput = innerGlowBuffer ?? unused
         var settings = Compose(width: UInt32(width), height: UInt32(height),
             strokeColor: SIMD4(Float(stroke?.color.red ?? 0), Float(stroke?.color.green ?? 0),
                                Float(stroke?.color.blue ?? 0), Float(stroke?.opacity ?? 0)),

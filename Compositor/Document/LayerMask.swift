@@ -394,7 +394,7 @@ extension EditorSession {
     }
 }
 
-extension ImageLayer {
+nonisolated extension ImageLayer {
     /// Where the mask's pixels sit on the document: its own placement, else the layer's.
     var maskTransform: LayerTransform { mask?.placement ?? transform }
 }

@@ -192,7 +192,7 @@ struct ProjectTests {
         session.createDocument(width: 100, height: 100)
         session.addBlankLayer()
         let before = session.document
-        session.isProjectBusy = true
+        session.beginProjectOperation()
         session.deleteActiveLayer()
         session.createDocument(width: 400, height: 400)
         session.undo()
@@ -200,7 +200,7 @@ struct ProjectTests {
         let pending = Task { await session.importImages([source]) }
         await Task.yield()
         #expect(!session.isImporting)
-        session.isProjectBusy = false
+        session.endProjectOperation()
         await pending.value
         #expect(session.document?.layers.count == 2)
         session.clearProject()

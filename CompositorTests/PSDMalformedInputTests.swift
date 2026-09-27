@@ -44,7 +44,7 @@ struct PSDMalformedInputTests {
             file += be32(2)
             file += be16(8)
             file += be16(3)
-            file += be32(0)          // colour mode data
+            file += be32(0)          // color mode data
             file += be32(0)          // image resources
             file += largeDocument ? be64(UInt64.max) : be32(UInt32.max)
             #expect(throws: (any Error).self) { try PSDReader.read(file) }
@@ -110,7 +110,7 @@ struct PSDMalformedInputTests {
                                                  bitmapInfo: CGImageAlphaInfo.none.rawValue))
             context.setFillColor(gray: 0.5, alpha: 1)
             context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
-            return try #require(context.makeImage())
+            return context.makeImage()!
         }()
         let file = try PSDFixture.data(PSDDocument(width: 8, height: 8, resolution: 72, layers: [layer]), composite: red)
         // 64 image pixels and 64 mask pixels: each budget is 64, so both fit.

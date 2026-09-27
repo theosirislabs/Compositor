@@ -100,12 +100,12 @@ extension EditorSession {
               point.x >= 0, point.y >= 0, point.x < document.size.width, point.y < document.size.height,
               let sample = selectionSample(document, sampleAllLayers: wandSettings.sampleAllLayers) else { return }
         let job = WandJob(image: sample, point: point, settings: wandSettings)
-        isProjectBusy = true
+        beginProjectOperation()
         let result = await Task.detached(priority: .userInitiated) { () -> WandResult in
             do { return WandResult(path: try MagicWand.select(in: job.image, at: job.point, settings: job.settings), error: nil) }
             catch { return WandResult(path: nil, error: error) }
         }.value
-        isProjectBusy = false
+        endProjectOperation()
         if let error = result.error { brushError = error.localizedDescription; return }
         guard self.document?.id == document.id else { return }
         guard let path = result.path else {

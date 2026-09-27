@@ -74,8 +74,8 @@ extension ProjectController {
 
     private func reloadFromDisk(_ url: URL) async {
         externalChanges.recheckAttempt = 0
-        session.isProjectBusy = true
-        defer { session.isProjectBusy = false }
+        session.beginProjectOperation()
+        defer { session.endProjectOperation() }
         // Loading runs off the main thread, as an open does. A package that fails to load, half written or
         // mid-sync, leaves the open document alone; the next change on disk is checked afresh.
         guard let snapshot = try? await ProjectStore.shared.load(from: url) else { return }

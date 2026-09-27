@@ -199,8 +199,8 @@ extension EditorSession {
     @discardableResult
     func trim(options: TrimOptions = TrimOptions()) async throws -> Bool {
         guard canStartProjectOperation, let snapshot = projectSnapshot() else { return false }
-        isProjectBusy = true
-        defer { isProjectBusy = false }
+        beginProjectOperation()
+        defer { endProjectOperation() }
         guard let trimmedSnapshot = try await ImageTrim.trim(snapshot, options: options) else {
             return false
         }

@@ -2,7 +2,7 @@ import AppKit
 import UniformTypeIdentifiers
 import SwiftUI
 
-private final class SheetRequest<Output>: @unchecked Sendable {
+private nonisolated final class SheetRequest<Output>: @unchecked Sendable {
     private struct Pending: @unchecked Sendable {
         let continuation: CheckedContinuation<Output?, Never>
         let cleanup: () -> Void
@@ -89,9 +89,9 @@ final class ProjectController {
 
     private func begin() -> Bool {
         guard session.canStartProjectOperation else { return false }
+        session.beginProjectOperation()
         session.cancelCrop()
         session.commitTransform()
-        session.isProjectBusy = true
         return true
     }
 
@@ -138,7 +138,7 @@ final class ProjectController {
         let prepared = await prepareSave(asNew: asNew)
         // Only the snapshot (and the Save panel) holds the tools. The document is captured, so editing can go on
         // while the package is written in the background, as in Photoshop.
-        session.isProjectBusy = false
+        session.endProjectOperation()
         guard let prepared else { return false }
         return await write(prepared.snapshot, to: prepared.destination, revision: prepared.revision)
     }
@@ -149,7 +149,7 @@ final class ProjectController {
 
     func exportPNG() async {
         guard session.document != nil, begin() else { return }
-        defer { session.isProjectBusy = false }
+        defer { session.endProjectOperation() }
         guard let snapshot = session.projectSnapshot() else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
@@ -169,7 +169,7 @@ final class ProjectController {
 
     func canvasSize() async {
         guard let window, let document = session.document, begin() else { return }
-        defer { session.isProjectBusy = false }
+        defer { session.endProjectOperation() }
         let sheet = NSWindow()
         sheet.styleMask = [.titled, .fullSizeContentView]
         sheet.title = "Canvas Size"
@@ -185,7 +185,7 @@ final class ProjectController {
 
     func imageSize() async {
         guard let window, let document = session.document, begin() else { return }
-        defer { session.isProjectBusy = false }
+        defer { session.endProjectOperation() }
         let sheet = NSWindow()
         sheet.styleMask = [.titled, .fullSizeContentView]
         sheet.title = "Image Size"
@@ -201,7 +201,7 @@ final class ProjectController {
 
     func trim() async {
         guard let window, session.document != nil, begin() else { return }
-        defer { session.isProjectBusy = false }
+        defer { session.endProjectOperation() }
         let sheet = NSWindow()
         sheet.styleMask = [.titled, .fullSizeContentView]
         sheet.title = "Trim"
@@ -219,7 +219,7 @@ final class ProjectController {
 
     func exportJPEG() async {
         guard let window, session.document != nil, begin() else { return }
-        defer { session.isProjectBusy = false }
+        defer { session.endProjectOperation() }
         guard let snapshot = session.projectSnapshot() else { return }
         do {
             let raster = try await ImageExporter.shared.render(snapshot)
@@ -303,7 +303,7 @@ final class ProjectController {
     func open(_ suppliedURL: URL? = nil) async -> Bool {
         if let workspace { return await workspace.open(suppliedURL) }
         guard begin() else { return false }
-        defer { session.isProjectBusy = false }
+        defer { session.endProjectOperation() }
         var source = suppliedURL
         if source == nil {
             let panel = NSOpenPanel()
@@ -352,7 +352,7 @@ final class ProjectController {
         if let workspace { workspace.newCanvas(); return }
         guard begin() else { return }
         let proceed = await confirmReplacement()
-        session.isProjectBusy = false
+        session.endProjectOperation()
         if proceed { session.clearProject(); stopWatchingProject() }
     }
 
@@ -362,7 +362,7 @@ final class ProjectController {
         }
         guard begin() else { return }
         let proceed = await confirmReplacement()
-        session.isProjectBusy = false
+        session.endProjectOperation()
         if proceed {
             session.clearProject()
             stopWatchingProject()
@@ -372,7 +372,7 @@ final class ProjectController {
 
     func confirmQuit() async -> Bool {
         guard begin() else { return false }
-        defer { session.isProjectBusy = false }
+        defer { session.endProjectOperation() }
         return await confirmReplacement()
     }
 

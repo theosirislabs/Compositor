@@ -96,6 +96,7 @@ final class DocumentHistory {
             for asset in [layer.asset, layer.mask?.asset].compactMap({ $0 }) {
                 seen.insert(ObjectIdentifier(asset.image))
                 seen.insert(ObjectIdentifier(asset.thumbnail))
+                asset.raster?.markRetained(in: &seen)
             }
         }
         var bytes = 0
@@ -106,6 +107,7 @@ final class DocumentHistory {
                         for image in [asset.image, asset.thumbnail] where seen.insert(ObjectIdentifier(image)).inserted {
                             bytes += image.bytesPerRow * image.height
                         }
+                        bytes += asset.raster?.retainedBytes(excluding: &seen) ?? 0
                     }
                 }
             }

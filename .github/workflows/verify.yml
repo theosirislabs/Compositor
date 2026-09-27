@@ -32,6 +32,9 @@ jobs:
           -scheme Compositor
           -onlyUsePackageVersionsFromResolvedFile
 
+      # C is warning-clean, so a new one is a build break. Swift is not: the codebase carries 45
+      # main-actor isolation warnings under Swift 6 that have to be worked down before
+      # SWIFT_TREAT_WARNINGS_AS_ERRORS can be switched on.
       - name: Build for testing
         id: build
         run: >
@@ -42,6 +45,19 @@ jobs:
           -configuration Debug
           -derivedDataPath DerivedData
           CODE_SIGN_IDENTITY=-
+          GCC_TREAT_WARNINGS_AS_ERRORS=YES
+
+      - name: Build Release
+        run: >
+          xcodebuild build
+          -project Compositor.xcodeproj
+          -scheme Compositor
+          -destination 'platform=macOS'
+          -configuration Release
+          -derivedDataPath DerivedData
+          CODE_SIGN_IDENTITY=-
+          CODE_SIGNING_ALLOWED=NO
+          GCC_TREAT_WARNINGS_AS_ERRORS=YES
 
       # These two suites show real windows and time them, so they run alone after the rest.
       - name: Run unit tests in parallel
@@ -52,6 +68,7 @@ jobs:
           -destination 'platform=macOS,arch=arm64'
           -derivedDataPath DerivedData
           -resultBundlePath ParallelResults.xcresult
+          -enableCodeCoverage YES
           -parallel-testing-enabled YES
           -skip-testing:CompositorTests/FloatingPanelTests
           -skip-testing:CompositorTests/SliderSnapTests

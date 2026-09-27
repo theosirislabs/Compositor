@@ -1,6 +1,33 @@
 import Accelerate
+import AppKit
 import CoreGraphics
 import Foundation
+
+nonisolated enum RenderCacheRegistry {
+    private static let lock = NSLock()
+    private static var purges: [() -> Void] = []
+    private static var observer: NSObjectProtocol?
+
+    static func register(_ purge: @escaping () -> Void) {
+        lock.lock()
+        purges.append(purge)
+        if observer == nil {
+            // macOS sends no memory warning. An app this size gets its warning when the user
+            // switches away — that is the moment nothing is drawing, and the moment to let go of
+            // the reduced copies and cached pieces nothing will ask for again.
+            observer = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification,
+                object: nil, queue: .main) { _ in RenderCacheRegistry.purge() }
+        }
+        lock.unlock()
+    }
+
+    static func purge() {
+        lock.lock()
+        let current = purges
+        lock.unlock()
+        for purge in current { purge() }
+    }
+}
 
 /// Sharp reductions of layer images. Core Graphics resamples in one step with a filter that only looks at a
 /// few neighbouring pixels, so shrinking an image 4× or 8× comes out soft or grainy at any interpolation
@@ -12,7 +39,7 @@ import Foundation
 /// piece of an image reduced on its own lines up with the whole image reduced (see `TiledLayerRenderer`).
 nonisolated final class DownsampleCache: @unchecked Sendable {
     static let shared = DownsampleCache()
-    /// Pixels of halved copies kept at once (about 400 MB of RGBA).
+    /// Pixels of halved copies kept at once (about 800 MB of RGBA).
     static let pixelBudget = DocumentLimits.maxSurfacePixels
     /// Most halvings ever used; past this Core Graphics does the rest.
     static let maxLevel = 6
@@ -26,6 +53,16 @@ nonisolated final class DownsampleCache: @unchecked Sendable {
     private var entries: [ObjectIdentifier: Entry] = [:]
     private var clock: UInt64 = 0
     private let lock = NSLock()
+
+    init() {
+        RenderCacheRegistry.register { [weak self] in self?.purge() }
+    }
+
+    func purge() {
+        lock.lock()
+        entries.removeAll()
+        lock.unlock()
+    }
 
     /// Halvings to draw from when an image lands `factor` output pixels per image pixel: the most that still
     /// leave the copy at least that large (0 from half size up).

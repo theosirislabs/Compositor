@@ -75,14 +75,23 @@ struct LayerAppearanceTests {
         session.createDocument(width: 4, height: 4)
         session.insert(try asset(0.4))
         session.insert(try asset(0.8))
-        for (mode, expected) in [(LayerBlendMode.normal, 0.8), (.multiply, 0.32), (.screen, 0.88),
-                                 (.overlay, 0.64), (.darken, 0.4), (.lighten, 0.8), (.difference, 0.4),
-                                 (.colorDodge, 1), (.colorBurn, 0.25)] {
+        let expectedValues: [LayerBlendMode: Double] = [
+            .normal: 0.8, .darken: 0.4, .multiply: 0.32, .colorBurn: 0.25,
+            .linearBurn: 0.2, .lighten: 0.8, .screen: 0.88, .colorDodge: 1,
+            .linearDodge: 1, .overlay: 0.64, .softLight: 0.544, .hardLight: 0.761,
+            // Vivid Light on a source brighter than 0.5 is min(1, Cs/(2(1-Cb))) = 0.4/0.4 = 1.
+            .vividLight: 1, .linearLight: 1, .pinLight: 0.6, .hardMix: 1,
+            .difference: 0.4, .exclusion: 0.56, .subtract: 0, .divide: 0.5,
+            .hue: 0.4, .saturation: 0.4, .color: 0.4, .luminosity: 0.8
+        ]
+        #expect(expectedValues.count == LayerBlendMode.allCases.count)
+        for mode in LayerBlendMode.allCases {
+            let expected = try #require(expectedValues[mode])
             session.setLayerBlendMode(mode)
             #expect(try JSONDecoder().decode(LayerBlendMode.self, from: JSONEncoder().encode(mode)) == mode)
             let raster = try await ImageExporter.shared.render(try #require(session.projectSnapshot()))
             let (value, alpha) = try pixel(raster.image)
-            #expect(abs(value - expected) < 0.02, "\(mode.rawValue): \(value), expected \(expected)")
+            #expect(abs(value - expected) < 0.02)
             #expect(alpha == 1)
         }
         session.setLayerBlendMode(.normal)

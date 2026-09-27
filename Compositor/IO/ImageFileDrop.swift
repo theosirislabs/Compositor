@@ -57,4 +57,14 @@ enum ImageFileDrop {
             }
         }
     }
+
+    /// One of the copies made above, and so safe to delete: a UUID-named folder of its own,
+    /// directly inside the temporary directory. Nothing else the user can name is touched.
+    static func discardTemporaryCopy(of url: URL) {
+        let temporary = FileManager.default.temporaryDirectory.standardizedFileURL
+        let folder = url.deletingLastPathComponent().standardizedFileURL
+        guard folder.deletingLastPathComponent() == temporary,
+              UUID(uuidString: folder.lastPathComponent) != nil else { return }
+        try? FileManager.default.removeItem(at: folder)
+    }
 }

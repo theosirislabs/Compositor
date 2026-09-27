@@ -174,7 +174,7 @@ final class ProjectController {
         sheet.styleMask = [.titled, .fullSizeContentView]
         sheet.title = "Canvas Size"
         let options: CanvasSizeOptions? = await awaitSheet(on: window, sheet: sheet) { completion in
-            sheet.contentViewController = NSHostingController(rootView: CanvasSizeSheet(document: document, foreground: session.foregroundColor, background: session.backgroundColor) { completion($0) })
+            sheet.contentViewController = NSHostingController(rootView: CanvasSizeSheet(document: document, session: session) { completion($0) })
         }
         guard let options, let snapshot = session.projectSnapshot() else { return }
         do {
@@ -227,7 +227,7 @@ final class ProjectController {
             sheet.styleMask = [.titled, .fullSizeContentView]
             sheet.title = "Export JPEG"
             let data: Data? = await awaitSheet(on: window, sheet: sheet) { completion in
-                sheet.contentViewController = NSHostingController(rootView: JPEGExportSheet(raster: raster) { completion($0) })
+                sheet.contentViewController = NSHostingController(rootView: JPEGExportSheet(raster: raster, session: session) { completion($0) })
             }
             guard let data else { return }
             let panel = NSSavePanel()
